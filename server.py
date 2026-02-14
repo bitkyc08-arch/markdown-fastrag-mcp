@@ -29,8 +29,37 @@ mcp = FastMCP(
 
 if not os.path.exists(INDEX_DATA_PATH):
     os.makedirs(INDEX_DATA_PATH)
-milvus_client = MilvusClient(os.path.join(INDEX_DATA_PATH, "milvus_markdown.db"))
-embedding_fn = model.DefaultEmbeddingFunction()
+
+# --- Embedding Provider Selection ---
+EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "local")
+EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "768"))
+
+if EMBEDDING_PROVIDER == "gemini":
+    from pymilvus.model.dense import OpenAIEmbeddingFunction
+    embedding_fn = OpenAIEmbeddingFunction(
+        model_name=os.getenv("EMBEDDING_MODEL", "gemini-embedding-001"),
+        api_key=os.getenv("GEMINI_API_KEY"),
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+        dimensions=EMBEDDING_DIM,
+    )
+elif EMBEDDING_PROVIDER == "voyage":
+    from pymilvus.model.dense import VoyageEmbeddingFunction
+    embedding_fn = VoyageEmbeddingFunction(
+        model_name=os.getenv("EMBEDDING_MODEL", "voyage-3"),
+        api_key=os.getenv("VOYAGE_API_KEY"),
+    )
+elif EMBEDDING_PROVIDER == "openai":
+    from pymilvus.model.dense import OpenAIEmbeddingFunction
+    embedding_fn = OpenAIEmbeddingFunction(
+        model_name=os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),
+        api_key=os.getenv("OPENAI_API_KEY"),
+    )
+else:
+    embedding_fn = model.DefaultEmbeddingFunction()  # 기본 로컬 (768d)
+
+# --- Milvus Client ---
+MILVUS_ADDRESS = os.getenv("MILVUS_ADDRESS", os.path.join(INDEX_DATA_PATH, "milvus_markdown.db"))
+milvus_client = MilvusClient(MILVUS_ADDRESS)
 
 
 def search(query: str, k: int) -> list[list[SearchResult]]:
@@ -102,9 +131,13 @@ async def index_documents(
     ).get_nodes_from_documents(nodes)
     chunked_nodes = [node for node in chunked_nodes if node.text.strip()]
 
-    # Extract text from nodes and embed
+    # Extract text from nodes and embed (batch to stay under API limits)
     texts = [node.text for node in chunked_nodes]
-    vectors = embedding_fn.encode_documents(texts)
+    BATCH_SIZE = 100
+    vectors = []
+    for i in range(0, len(texts), BATCH_SIZE):
+        batch = texts[i : i + BATCH_SIZE]
+        vectors.extend(embedding_fn.encode_documents(batch))
     data = [
         {
             "vector": vector,
