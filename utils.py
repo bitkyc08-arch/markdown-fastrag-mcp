@@ -1,3 +1,7 @@
+# Modified from original MCP-Markdown-RAG by Zackriya Solutions
+# (https://github.com/Zackriya-Solutions/MCP-Markdown-RAG)
+# Changes: configurable embedding dimension via EMBEDDING_DIM env var.
+
 import hashlib
 import json
 import os

@@ -1,3 +1,8 @@
+# Modified from original MCP-Markdown-RAG by Zackriya Solutions
+# (https://github.com/Zackriya-Solutions/MCP-Markdown-RAG)
+# Changes: multi-provider embedding support (Gemini/Voyage/OpenAI),
+#          configurable Milvus address, batch embedding for API limits.
+
 import os
 
 from fastmcp import FastMCP
