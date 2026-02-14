@@ -3,11 +3,14 @@
 # Changes: multi-provider embedding support (Gemini/Voyage/OpenAI),
 #          configurable Milvus address, batch embedding for API limits.
 
+import asyncio
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 from fastmcp import FastMCP
@@ -44,6 +47,27 @@ if not os.path.exists(INDEX_DATA_PATH):
 EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "local").lower()
 EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "768"))
 embedding_log_details = ""
+
+
+def _get_int_env(name: str, default: int, minimum: int | None = None) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        value = default
+    else:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = default
+    if minimum is not None and value < minimum:
+        return minimum
+    return value
+
+
+MARKDOWN_CHUNK_SIZE = _get_int_env("MARKDOWN_CHUNK_SIZE", 2048, minimum=32)
+MARKDOWN_CHUNK_OVERLAP = _get_int_env("MARKDOWN_CHUNK_OVERLAP", 100, minimum=0)
+EMBEDDING_BATCH_SIZE = _get_int_env("EMBEDDING_BATCH_SIZE", 250, minimum=1)
+EMBEDDING_BATCH_DELAY_MS = _get_int_env("EMBEDDING_BATCH_DELAY_MS", 0, minimum=0)
+EMBEDDING_CONCURRENT_BATCHES = _get_int_env("EMBEDDING_CONCURRENT_BATCHES", 4, minimum=1)
 
 
 class VertexEmbeddingFunction:
@@ -196,6 +220,14 @@ else:
     embedding_log_details = "provider=local model=DefaultEmbeddingFunction"
 
 print(f"[Embedding] {embedding_log_details} dim={EMBEDDING_DIM}", file=sys.stderr)
+print(
+    "[Indexing] "
+    f"chunk_size={MARKDOWN_CHUNK_SIZE} "
+    f"chunk_overlap={MARKDOWN_CHUNK_OVERLAP} "
+    f"batch_size={EMBEDDING_BATCH_SIZE} "
+    f"batch_delay_ms={EMBEDDING_BATCH_DELAY_MS}",
+    file=sys.stderr,
+)
 
 # --- Milvus Client ---
 MILVUS_ADDRESS = os.getenv("MILVUS_ADDRESS", os.path.join(INDEX_DATA_PATH, "milvus_markdown.db"))
@@ -265,19 +297,41 @@ async def index_documents(
         processed_files = changed_files
 
     # Convert to nodes based on markdown structure, then split larger nodes into chunks
-    nodes = MarkdownNodeParser().get_nodes_from_documents(documents)
+    # MarkdownNodeParser respects chunk_size as max size per section
+    nodes = MarkdownNodeParser(chunk_size=MARKDOWN_CHUNK_SIZE).get_nodes_from_documents(documents)
+    chunk_overlap = min(MARKDOWN_CHUNK_OVERLAP, max(0, MARKDOWN_CHUNK_SIZE - 1))
     chunked_nodes = TokenTextSplitter(
-        chunk_size=512, chunk_overlap=100
+        chunk_size=MARKDOWN_CHUNK_SIZE, chunk_overlap=chunk_overlap
     ).get_nodes_from_documents(nodes)
     chunked_nodes = [node for node in chunked_nodes if node.text.strip()]
 
-    # Extract text from nodes and embed (batch to stay under API limits)
+    # Extract text from nodes and embed (parallel batches for speed)
     texts = [node.text for node in chunked_nodes]
-    BATCH_SIZE = 100
-    vectors = []
-    for i in range(0, len(texts), BATCH_SIZE):
-        batch = texts[i : i + BATCH_SIZE]
-        vectors.extend(embedding_fn.encode_documents(batch))
+    batches = [texts[i : i + EMBEDDING_BATCH_SIZE] for i in range(0, len(texts), EMBEDDING_BATCH_SIZE)]
+    total_batches = len(batches)
+    print(f"[Embedding] {len(texts)} chunks in {total_batches} batches (size={EMBEDDING_BATCH_SIZE}, concurrent={EMBEDDING_CONCURRENT_BATCHES})", file=sys.stderr, flush=True)
+
+    vectors: list[list[float]] = [None] * len(texts)  # type: ignore[assignment]
+    executor = ThreadPoolExecutor(max_workers=EMBEDDING_CONCURRENT_BATCHES)
+    loop = asyncio.get_event_loop()
+
+    async def embed_one(batch_idx: int, batch: list[str], offset: int) -> None:
+        print(f"[Embedding] batch {batch_idx+1}/{total_batches} ({offset}~{offset+len(batch)}/{len(texts)})", file=sys.stderr, flush=True)
+        result = await loop.run_in_executor(executor, embedding_fn.encode_documents, batch)
+        for j, vec in enumerate(result):
+            vectors[offset + j] = vec
+
+    # Process in waves of EMBEDDING_CONCURRENT_BATCHES
+    for wave_start in range(0, total_batches, EMBEDDING_CONCURRENT_BATCHES):
+        wave = []
+        for k in range(wave_start, min(wave_start + EMBEDDING_CONCURRENT_BATCHES, total_batches)):
+            offset = k * EMBEDDING_BATCH_SIZE
+            wave.append(embed_one(k, batches[k], offset))
+        await asyncio.gather(*wave)
+        if EMBEDDING_BATCH_DELAY_MS > 0:
+            await asyncio.sleep(EMBEDDING_BATCH_DELAY_MS / 1000.0)
+
+    executor.shutdown(wait=False)
     data = [
         {
             "vector": vector,

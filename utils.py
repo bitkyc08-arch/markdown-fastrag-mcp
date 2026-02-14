@@ -60,11 +60,16 @@ def update_tracking_file(processed_files: list[str], is_clear: bool = False):
     save_tracking_file(tracking_data)
 
 
+_DEFAULT_EXCLUDE_DIRS = {"node_modules", "__pycache__", "devlog", "_legacy", "dist", "build", ".git"}
+_extra = os.getenv("MARKDOWN_EXCLUDE_DIRS", "")
+EXCLUDE_DIRS = _DEFAULT_EXCLUDE_DIRS | (set(_extra.split(",")) if _extra else set())
+
+
 def list_md_files(base_dir: str, recursive: bool = False) -> list[str]:
     md_files = []
     if recursive:
         for root, dirs, files in os.walk(base_dir):
-            dirs[:] = [d for d in dirs if not d.startswith(".")]
+            dirs[:] = [d for d in dirs if not d.startswith(".") and d not in EXCLUDE_DIRS]
             for file in files:
                 if file.endswith(".md"):
                     md_files.append(os.path.join(root, file))
