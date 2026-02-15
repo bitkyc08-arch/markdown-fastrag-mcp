@@ -10,7 +10,7 @@ A semantic search engine for your markdown documents. An MCP server that indexes
 
 ```mermaid
 graph LR
-    A["Claude Code"] --> M["Milvus Standalone\n(Docker)"]
+    A["Claude Code"] --> M["Milvus Standalone<br/>(Docker)"]
     B["Codex"] --> M
     C["Copilot"] --> M
     D["Antigravity"] --> M
@@ -75,15 +75,15 @@ graph TB
 
 ```mermaid
 flowchart LR
-    A["📁 Markdown Files"] -->|"directory walk\n+ exclude filter"| B["🔍 Delta Scan\nmtime/size check"]
-    B -->|changed| C["✂️ Chunk\nSentenceSplitter"]
+    A["📁 Markdown Files"] -->|"directory walk<br/>+ exclude filter"| B["🔍 Delta Scan<br/>mtime/size check"]
+    B -->|changed| C["✂️ Chunk<br/>SentenceSplitter"]
     B -->|unchanged| SKIP["⏭️ Skip"]
-    B -->|deleted| PRUNE["🗑️ Prune\nMilvus delete"]
-    C --> D["🧠 Embed\nVertex/Gemini/OpenAI"]
-    D -->|"batch insert"| E["💾 Milvus\nVector Store"]
+    B -->|deleted| PRUNE["🗑️ Prune<br/>Milvus delete"]
+    C --> D["🧠 Embed<br/>Vertex/Gemini/OpenAI"]
+    D -->|"batch insert"| E["💾 Milvus<br/>Vector Store"]
 
     F["🔎 Search Query"] --> D
-    D -->|"cosine similarity"| G["📊 Top-K Results\nwith relevance %"]
+    D -->|"cosine similarity"| G["📊 Top-K Results<br/>with relevance %"]
 
     style A fill:#2d3748,color:#e2e8f0
     style D fill:#553c9a,color:#e9d8fd
@@ -141,17 +141,17 @@ Add to your MCP host config:
 | **Local**             | `local`              | Milvus built-in (768d)   | —               |
 
 <details>
-<summary><strong>Vertex AI</strong> — Google Cloud 프로덕션 권장</summary>
+<summary><strong>Vertex AI</strong> — Recommended for production</summary>
 
-Google Cloud의 Vertex AI를 통해 `gemini-embedding-001` 모델을 사용합니다. API key 대신 **Service Account 인증**을 사용하며, OAuth 토큰이 자동 갱신됩니다. 프로덕션 환경에서 가장 안정적입니다.
+Uses `gemini-embedding-001` via Google Cloud Vertex AI. Authenticates with **Service Account** instead of API key, with automatic OAuth token refresh. Most stable for production workloads.
 
-**장점**: 높은 Rate Limit, 자동 토큰 갱신, GCP 프로젝트 단위 빌링
-**단점**: GCP 프로젝트 + Service Account 설정 필요
+**Pros**: High rate limits, automatic token refresh, per-project billing
+**Cons**: Requires GCP project + Service Account setup
 
-**사전 준비**:
-1. GCP 프로젝트 생성 & Vertex AI API 활성화
-2. Service Account 생성 → JSON 키 다운로드
-3. `Vertex AI User` 역할 부여
+**Prerequisites**:
+1. Create GCP project & enable Vertex AI API
+2. Create Service Account → download JSON key
+3. Grant `Vertex AI User` role
 
 ```json
 {
@@ -164,20 +164,20 @@ Google Cloud의 Vertex AI를 통해 `gemini-embedding-001` 모델을 사용합�
 }
 ```
 
-**참고**: `VERTEX_LOCATION`은 모델 사용 가능 리전에 맞춰야 합니다. `gemini-embedding-001`은 `us-central1`에서 사용 가능. 전체 리전 목록은 [Vertex AI 문서](https://cloud.google.com/vertex-ai/docs/general/locations)를 참고.
+**Note**: `VERTEX_LOCATION` must match a region where the model is available. `gemini-embedding-001` is available in `us-central1`. See [Vertex AI docs](https://cloud.google.com/vertex-ai/docs/general/locations) for full region list.
 
 </details>
 
 <details>
-<summary><strong>Gemini</strong> — 빠른 시작에 가장 쉬움</summary>
+<summary><strong>Gemini</strong> — Easiest to get started</summary>
 
-Google AI Studio의 Gemini API를 사용합니다. API key 하나면 바로 사용 가능해서 가장 간단합니다. 내부적으로 OpenAI-compatible 엔드포인트(`generativelanguage.googleapis.com/v1beta/openai/`)를 사용합니다.
+Uses Google AI Studio's Gemini API. Just one API key to get started — the simplest option. Internally uses OpenAI-compatible endpoint (`generativelanguage.googleapis.com/v1beta/openai/`).
 
-**장점**: 가입 후 즉시 사용, 무료 Tier 있음
-**단점**: Rate Limit이 Vertex 대비 낮음 (분당 1,500 RPM 기본)
+**Pros**: Instant setup, free tier available
+**Cons**: Lower rate limits than Vertex (1,500 RPM default)
 
-**사전 준비**:
-1. [Google AI Studio](https://aistudio.google.com/)에서 API key 발급
+**Prerequisites**:
+1. Get API key from [Google AI Studio](https://aistudio.google.com/)
 
 ```json
 {
@@ -188,20 +188,20 @@ Google AI Studio의 Gemini API를 사용합니다. API key 하나면 바로 사�
 }
 ```
 
-**참고**: 대량 인덱싱(1000+ 파일) 시 429 에러가 발생할 수 있습니다. `EMBEDDING_BATCH_DELAY_MS=1000`으로 설정하면 안정적입니다.
+**Note**: Bulk indexing (1000+ files) may trigger 429 errors. Set `EMBEDDING_BATCH_DELAY_MS=1000` for stability.
 
 </details>
 
 <details>
-<summary><strong>OpenAI</strong> — text-embedding-3 시리즈</summary>
+<summary><strong>OpenAI</strong> — text-embedding-3 series</summary>
 
-OpenAI의 임베딩 API를 사용합니다. `text-embedding-3-small` (1536d)과 `text-embedding-3-large` (3072d) 모델을 지원합니다. `EMBEDDING_DIM`으로 차원을 줄일 수 있습니다 (Matryoshka representation).
+Uses OpenAI's embedding API. Supports `text-embedding-3-small` (1536d) and `text-embedding-3-large` (3072d). Use `EMBEDDING_DIM` to reduce dimensions (Matryoshka representation).
 
-**장점**: 높은 품질, 차원 축소 지원
-**단점**: 유료 (small: $0.02/1M tokens, large: $0.13/1M tokens)
+**Pros**: High quality, dimension reduction support
+**Cons**: Paid (small: $0.02/1M tokens, large: $0.13/1M tokens)
 
-**사전 준비**:
-1. [OpenAI Platform](https://platform.openai.com/)에서 API key 발급
+**Prerequisites**:
+1. Get API key from [OpenAI Platform](https://platform.openai.com/)
 
 ```json
 {
@@ -212,17 +212,17 @@ OpenAI의 임베딩 API를 사용합니다. `text-embedding-3-small` (1536d)과 
 }
 ```
 
-**참고**: `EMBEDDING_DIM`을 768로 설정하면 원래 1536d 벡터를 768d로 줄여서 저장합니다. 검색 품질은 소폭 감소하지만 스토리지와 속도가 개선됩니다.
+**Note**: Setting `EMBEDDING_DIM` to 768 truncates the original 1536d vectors. Slightly reduced search quality but improved storage and speed.
 
 </details>
 
 <details>
-<summary><strong>OpenAI-compatible</strong> — 자체 호스팅 / 써드파티 API</summary>
+<summary><strong>OpenAI-compatible</strong> — Self-hosted / third-party APIs</summary>
 
-OpenAI API 형식을 따르는 모든 임베딩 서비스에 연결합니다. Ollama, LM Studio, Azure OpenAI, Together AI, Fireworks AI 등 다양한 서비스와 호환됩니다.
+Connects to any embedding service following the OpenAI API format. Compatible with Ollama, LM Studio, Azure OpenAI, Together AI, Fireworks AI, and more.
 
-**장점**: 자체 호스팅 모델 사용 가능, 프라이버시 보장
-**단점**: 서비스별 설정이 다를 수 있음
+**Pros**: Use self-hosted models, full privacy
+**Cons**: Configuration varies by service
 
 ```json
 {
@@ -234,15 +234,15 @@ OpenAI API 형식을 따르는 모든 임베딩 서비스에 연결합니다. Ol
 }
 ```
 
-**Ollama 예시**: Ollama에서 `nomic-embed-text`를 사용하려면:
+**Ollama example**:
 
 ```bash
 ollama pull nomic-embed-text
 # EMBEDDING_BASE_URL=http://localhost:11434/v1
-# EMBEDDING_API_KEY=ollama  (아무 값이나 OK)
+# EMBEDDING_API_KEY=ollama  (any value works)
 ```
 
-**Azure OpenAI 예시**:
+**Azure OpenAI example**:
 
 ```json
 {
@@ -254,15 +254,15 @@ ollama pull nomic-embed-text
 </details>
 
 <details>
-<summary><strong>Voyage</strong> — Retrieval 특화 임베딩</summary>
+<summary><strong>Voyage</strong> — Retrieval-optimized embeddings</summary>
 
-Voyage AI의 임베딩 모델을 사용합니다. `voyage-3`은 검색(retrieval) 태스크에 최적화되어 있어서 RAG에 특히 적합합니다. Anthropic이 Claude에 사용하는 임베딩 provider로도 알려져 있습니다.
+Uses Voyage AI embedding models. `voyage-3` is optimized for retrieval tasks, making it especially suitable for RAG. Known as the embedding provider used by Anthropic for Claude.
 
-**장점**: RAG/검색 품질 최상위권, 긴 컨텍스트 지원 (최대 32K tokens)
-**단점**: 유료 ($0.06/1M tokens), 무료 Tier 제한적
+**Pros**: Top-tier RAG/retrieval quality, long context support (up to 32K tokens)
+**Cons**: Paid ($0.06/1M tokens), limited free tier
 
-**사전 준비**:
-1. [Voyage AI](https://www.voyageai.com/)에서 API key 발급
+**Prerequisites**:
+1. Get API key from [Voyage AI](https://www.voyageai.com/)
 
 ```json
 {
@@ -272,25 +272,25 @@ Voyage AI의 임베딩 모델을 사용합니다. `voyage-3`은 검색(retrieval
 }
 ```
 
-**사용 가능 모델**:
+**Available models**:
 
-| 모델            | 차원 | 최대 토큰 | 용도        |
-| --------------- | ---- | --------- | ----------- |
-| `voyage-3`      | 1024 | 32K       | 범용 (권장) |
-| `voyage-3-lite` | 512  | 32K       | 경량/저비용 |
-| `voyage-code-3` | 1024 | 32K       | 코드 특화   |
+| Model           | Dims | Max Tokens | Use Case              |
+| --------------- | ---- | ---------- | --------------------- |
+| `voyage-3`      | 1024 | 32K        | General (recommended) |
+| `voyage-3-lite` | 512  | 32K        | Lightweight / low-cost |
+| `voyage-code-3` | 1024 | 32K        | Code-optimized        |
 
-**참고**: `EMBEDDING_DIM`을 별도 설정하지 않아도 됩니다. Voyage는 모델별 고정 차원을 사용합니다.
+**Note**: No need to set `EMBEDDING_DIM` separately. Voyage uses fixed dimensions per model.
 
 </details>
 
 <details>
-<summary><strong>Local</strong> — 오프라인 / 무료</summary>
+<summary><strong>Local</strong> — Offline / free</summary>
 
-Milvus에 내장된 기본 임베딩 함수를 사용합니다 (`DefaultEmbeddingFunction`, 768d). 인터넷 연결이나 API key 없이 완전한 로컬 환경에서 동작합니다.
+Uses Milvus's built-in default embedding function (`DefaultEmbeddingFunction`, 768d). Runs entirely locally without internet connection or API keys.
 
-**장점**: 무료, 오프라인 사용, API 의존성 없음
-**단점**: 클라우드 모델 대비 검색 품질 낮음, 첫 실행 시 모델 다운로드에 시간 소요
+**Pros**: Free, offline, no API dependency
+**Cons**: Lower search quality vs cloud models, initial model download on first run
 
 ```json
 {
@@ -298,7 +298,7 @@ Milvus에 내장된 기본 임베딩 함수를 사용합니다 (`DefaultEmbeddin
 }
 ```
 
-별도 환경변수 설정이 필요 없습니다. `EMBEDDING_PROVIDER`를 생략해도 기본값이 `local`입니다. 테스트나 프로토타이핑에 적합합니다.
+No additional env vars needed. Omitting `EMBEDDING_PROVIDER` defaults to `local`. Suitable for testing and prototyping.
 
 </details>
 
@@ -336,78 +336,78 @@ flowchart TD
 ### Optimization Techniques
 
 <details>
-<summary><strong>1. mtime/size Fast-Path</strong> — 파일을 읽지 않고 변경 여부 판단</summary>
+<summary><strong>1. mtime/size Fast-Path</strong> — Skip unchanged files without reading them</summary>
 
-전통적인 증분 인덱싱은 모든 파일을 열어서 해시를 계산합니다. 1300개 파일이면 1300번 파일 I/O가 발생합니다.
+Traditional incremental indexing opens every file to compute a hash. With 1300 files, that's 1300 file I/O operations.
 
-이 서버는 `os.stat()` 시스템콜로 **mtime(수정 시각)과 size(파일 크기)만 먼저 확인**합니다. 이 두 값이 tracking과 동일하면 내용이 바뀌지 않았다고 판단하고 **파일을 아예 열지 않습니다**.
+This server uses `os.stat()` to check **mtime and file size first**. If both match the tracking data, the file is assumed unchanged and **never opened**.
 
 ```python
-# Fast path: 파일을 읽지 않고 메타데이터만 비교
-file_stat = os.stat(file_path)  # 시스템콜 1회 (ns 단위)
+# Fast path: compare metadata only, no file read
+file_stat = os.stat(file_path)  # single syscall (ns-scale)
 if stored_mtime == file_stat.st_mtime and stored_size == file_stat.st_size:
-    continue  # 파일 읽기 0회, 해시 계산 0회
+    continue  # zero file reads, zero hash computations
 ```
 
-**효과**: 1300개 파일 스캔 시 해시 계산 0회 → 전체 스캔이 수 밀리초에 완료.
+**Result**: Scanning 1300 files with zero hash computations — full scan completes in milliseconds.
 
 </details>
 
 <details>
-<summary><strong>2. Single-Pass Delta Scan</strong> — 변경 + 삭제를 한 번에 감지</summary>
+<summary><strong>2. Single-Pass Delta Scan</strong> — Detect changes + deletions in one walk</summary>
 
-기존 구현은 두 번의 스캔이 필요했습니다:
-- Pass 1: `get_changed_files()` — 디렉토리를 순회하며 변경된 파일 찾기
-- Pass 2: `get_deleted_files()` — tracking 데이터를 순회하며 삭제된 파일 찾기
+The original implementation required two passes:
+- Pass 1: `get_changed_files()` — walk directory to find changed files
+- Pass 2: `get_deleted_files()` — walk tracking data to find deleted files
 
-이것을 `get_index_delta()`로 통합하여 **한 번의 디렉토리 순회**로 변경과 삭제를 동시에 감지합니다.
+Unified into `get_index_delta()` — **one directory walk** detects both changes and deletions simultaneously.
 
 ```python
 def get_index_delta(directory, recursive=False) -> tuple[list[str], list[str]]:
     md_files = list_md_files(directory, recursive)
     current_files_set = set(md_files)
 
-    # Pass 1 of 1: 삭제 감지 (tracking에 있지만 디스크에 없는 파일)
+    # Single pass: detect deletions (tracked but not on disk)
     for tracked_path in list(tracking_data.keys()):
         if tracked_path not in current_files_set:
             deleted_files.append(tracked_path)
 
-    # Pass 1 of 1 (계속): 변경 감지 (mtime/size fast-path → hash fallback)
+    # Single pass (cont.): detect changes (mtime/size fast-path → hash fallback)
     for file_path in md_files:
-        # ... mtime/size 비교 → hash 비교
+        # ... mtime/size comparison → hash comparison
     
-    return changed_files, deleted_files  # 한 번에 반환
+    return changed_files, deleted_files  # both in one call
 ```
 
-**효과**: 2-pass → 1-pass로 디렉토리 순회 횟수 절반. 벤치마크 기준 **2.28x 속도 개선**.
+**Result**: 2-pass → 1-pass, halving directory traversals. Benchmarked at **2.28x faster**.
 
 </details>
 
 <details>
-<summary><strong>3. Tracking Format 확장</strong> — 하위호환 유지하면서 size 추가</summary>
+<summary><strong>3. Tracking Format Extension</strong> — Backward-compatible size field</summary>
 
-tracking 파일 (`index_tracking.json`)의 포맷을 확장하여 파일 크기 정보를 추가했습니다.
+Extended the tracking file (`index_tracking.json`) format to include file size:
 
 ```
-Before: [hash, mtime]            ← 기존 포맷
-After:  [hash, mtime, size]      ← 확장 포맷
+Before: [hash, mtime]            ← original format
+After:  [hash, mtime, size]      ← extended format
 ```
 
-`_parse_tracking_entry()` 파서가 두 포맷 모두 읽을 수 있어서 **기존 데이터를 마이그레이션하지 않아도 됩니다**. 다음 스캔 시 자동으로 size가 추가됩니다.
+The `_parse_tracking_entry()` parser reads both formats, so **no migration needed**. The size field is added automatically on the next scan.
 
 </details>
 
 <details>
-<summary><strong>4. Batch Embedding + Rate Limit Retry</strong> — 대량 임베딩 안정성</summary>
+<summary><strong>4. Batch Embedding + Rate Limit Retry</strong> — Reliable bulk embedding</summary>
 
-임베딩 API에 수천 개의 텍스트를 보낼 때 발생하는 문제들을 처리합니다:
+Handles common issues when sending thousands of texts to embedding APIs:
 
-| 문제                        | 해결                                                        |
+| Problem                     | Solution                                                     |
 | --------------------------- | ----------------------------------------------------------- |
-| API 429 (Too Many Requests) | Exponential backoff 재시도 (5s → 10s → 20s → 40s, 최대 5회) |
-| gRPC 64MB 메시지 초과       | `MILVUS_INSERT_BATCH=5000`으로 분할 insert                  |
-| 대량 요청 시 메모리         | `EMBEDDING_BATCH_SIZE=100`으로 마이크로 배치                |
-| API 간 딜레이               | `EMBEDDING_BATCH_DELAY_MS=1000`으로 조절                    |
+| API 429 (Too Many Requests) | Exponential backoff retry (5s → 10s → 20s → 40s, max 5 attempts) |
+| gRPC 64MB message limit     | Split inserts via `MILVUS_INSERT_BATCH=5000`                 |
+| Memory pressure             | Micro-batching via `EMBEDDING_BATCH_SIZE=100`                |
+| Inter-batch delay           | Configurable via `EMBEDDING_BATCH_DELAY_MS=1000`             |
 
 </details>
 
@@ -435,18 +435,18 @@ No manual cleanup needed — just delete the file and re-index.
 
 ## Shell Reindex CLI
 
-### MCP vs Shell — 언제 무엇을 쓰나?
+### MCP vs Shell — When to use which?
 
-| 상황                             | MCP `index_documents` | Shell `reindex.py` |
+| Scenario                         | MCP `index_documents` | Shell `reindex.py` |
 | -------------------------------- | :-------------------: | :----------------: |
-| 파일 몇 개 변경 후 증분 업데이트 |           ✅           |                    |
-| 1000+ 파일 전체 재인덱싱         |                       |         ✅          |
-| 모노레포 / 대규모 코드베이스     |                       |         ✅          |
-| 429/gRPC 에러 디버깅 필요        |                       |         ✅          |
-| 실시간 진행률 로그 확인          |                       |         ✅          |
-| AI 에이전트가 자동으로 실행      |           ✅           |                    |
+| Incremental update (few files)   |           ✅           |                    |
+| Full reindex (1000+ files)       |                       |         ✅          |
+| Monorepo / large codebase        |                       |         ✅          |
+| Debugging 429/gRPC errors        |                       |         ✅          |
+| Real-time progress logs          |                       |         ✅          |
+| AI agent automatic execution     |           ✅           |                    |
 
-MCP 도구(`index_documents`)는 **최종 결과만 반환**하기 때문에 실시간 로그를 볼 수 없고, 대량 인덱싱 시 타임아웃 위험이 있습니다. `reindex.py`는 shell에서 직접 실행하여 배치 진행률, 에러, 소요 시간을 실시간으로 확인할 수 있습니다.
+MCP tools (`index_documents`) only return final results — no real-time logs, and long indexing runs risk timeout. `reindex.py` runs directly in the shell with real-time batch progress, errors, and elapsed time.
 
 ### Usage
 
@@ -481,28 +481,28 @@ uv run python reindex.py /path/to/vault --no-recursive
 <details>
 <summary><strong>Mono-repo / Large Codebase Guide</strong></summary>
 
-모노레포나 대규모 문서 볼트(1000+ 파일)에서는 MCP 대신 shell reindex를 사용하세요.
+For monorepos or large document vaults (1000+ files), use shell reindex instead of MCP.
 
-**첫 인덱싱 (전체)**:
+**Initial indexing (full)**:
 ```bash
-# 전체 볼트를 한 번에 인덱싱 (약 7-8분)
+# Full vault indexing (~7-8 minutes)
 uv run python reindex.py /path/to/monorepo --force
 ```
 
-**이후 일상 업데이트**:
+**Daily incremental updates**:
 ```bash
-# 변경된 파일만 증분 인덱싱 (수 초)
+# Only changed files (seconds)
 uv run python reindex.py /path/to/monorepo
 ```
 
-**디렉토리 제외**:
+**Exclude directories**:
 ```bash
-# 특정 디렉토리 제외 (env로 설정)
+# Exclude specific directories via env
 MARKDOWN_EXCLUDE_DIRS="_legacy,archive,vendor" \
 uv run python reindex.py /path/to/monorepo
 ```
 
-**Rate limit 보수적 설정** (Vertex AI 무료 Tier 등):
+**Conservative rate limiting** (e.g. Vertex AI free tier):
 ```bash
 EMBEDDING_BATCH_SIZE=50 \
 EMBEDDING_BATCH_DELAY_MS=2000 \
@@ -513,9 +513,9 @@ uv run python reindex.py /path/to/vault --force
 </details>
 
 <details>
-<summary><strong>RAG Skill Reference</strong> — AI 에이전트용 권장 워크플로우</summary>
+<summary><strong>RAG Skill Reference</strong> — Recommended workflow for AI agents</summary>
 
-AI 에이전트(Claude Code, Antigravity, Codex 등)가 이 서버를 사용할 때의 권장 워크플로우입니다. `.agents/skills/rag/SKILL.md`에서 발췌:
+Recommended workflow when AI agents (Claude Code, Antigravity, Codex, etc.) use this server:
 
 **Document RAG Flow**:
 ```
@@ -523,17 +523,17 @@ index_documents(directory, recursive=true) → search_documents(query, k)
 ```
 
 **When to use Shell vs MCP**:
-- MCP: 소규모 증분 업데이트 (일상적 사용)
-- Shell: 전체 리인덱싱 (`--force`), 1000+ 파일 대량 업데이트, 에러 디버깅
+- MCP: Small incremental updates (daily use)
+- Shell: Full reindex (`--force`), 1000+ file bulk updates, error debugging
 
 **Query Language Policy**:
 - Code RAG → English queries
 - Document RAG → User's language (e.g. Korean)
 
-**Destructive Operations (주의)**:
-- `index_documents(force_reindex=true)` — 컬렉션 drop 후 재생성
-- `clear_index` — 전체 벡터 + tracking 삭제
-- 사용자가 명시적으로 요청할 때만 실행
+**Destructive Operations (caution)**:
+- `index_documents(force_reindex=true)` — drops and recreates collection
+- `clear_index` — deletes all vectors + tracking data
+- Only execute when explicitly requested by user
 
 </details>
 

@@ -15,3 +15,5 @@ wheels/
 # Data
 .db/
 demo/
+# Internal development logs
+devlog/
