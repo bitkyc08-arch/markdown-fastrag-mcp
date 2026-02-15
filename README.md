@@ -5,6 +5,7 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-green)](LICENSE)
 [![MCP Server](https://img.shields.io/badge/MCP-Server-blue)](https://modelcontextprotocol.io)
 [![Python](https://img.shields.io/badge/Python-%3E%3D3.10-blue.svg)](https://python.org/)
+[![Async Indexing](https://img.shields.io/badge/Indexing-Async%20Background-brightgreen)]()
 
 A semantic search engine for your markdown documents. An MCP server that indexes notes, docs, and knowledge bases into a Milvus vector database, letting AI assistants find relevant content by **meaning**. Supports **multi-agent concurrent access** via Milvus Docker — run Claude, Codex, Copilot, and Antigravity against the same document index simultaneously.
 
@@ -49,6 +50,7 @@ Add to your MCP host config:
 
 - **Semantic matching** — finds conceptually related content, not just keyword hits
 - **Multi-provider embeddings** — Gemini, OpenAI, Vertex AI, Voyage, or local models
+- **Async background indexing** — non-blocking `start_index_documents` returns instantly; poll progress with `get_index_status`
 - **Smart incremental indexing** — mtime/size fast-path skips unchanged files without reading them; hash only computed when metadata changes
 - **Single-pass delta scan** — detects new, changed, and deleted files in one directory walk
 - **Stale vector pruning** — automatically removes vectors for deleted or moved files from Milvus
@@ -65,9 +67,17 @@ Add to your MCP host config:
 graph TB
     subgraph MCP["MCP Server (server.py)"]
         direction TB
-        IDX["index_documents<br/>Incremental Indexing"]
+        IDX["index_documents<br/>Blocking"]
+        SIDX["start_index_documents<br/>Async (instant return)"]
+        GSTAT["get_index_status<br/>Poll progress"]
         SEARCH["search_documents<br/>Semantic Search"]
         CLEAR["clear_index<br/>Reset"]
+    end
+
+    subgraph Jobs["Background Job Manager"]
+        REGISTRY["JobRecord Registry<br/>queued → running → succeeded/failed"]
+        TASK["asyncio.create_task<br/>Non-blocking execution"]
+        TTL["TTL Cleanup<br/>expired job pruning"]
     end
 
     subgraph Indexing["Indexing Engine (utils.py)"]
@@ -90,10 +100,15 @@ graph TB
     end
 
     IDX --> DELTA --> CHUNK --> Embed --> Store
+    SIDX --> TASK --> REGISTRY
+    TASK --> DELTA
+    GSTAT --> REGISTRY
+    TTL --> REGISTRY
     SEARCH --> Embed --> Store
     DELTA <--> TRACK
 
     style MCP fill:#2d3748,color:#e2e8f0
+    style Jobs fill:#7b341e,color:#feebc8
     style Embed fill:#553c9a,color:#e9d8fd
     style Store fill:#2a4365,color:#bee3f8
     style Indexing fill:#22543d,color:#c6f6d5
@@ -317,11 +332,52 @@ No additional env vars needed. Omitting `EMBEDDING_PROVIDER` defaults to `local`
 
 ## Tools
 
-| Tool               | Description                                                                                                                             |
-| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `index_documents`  | Index markdown files with incremental updates. Automatically detects new, changed, and deleted files. Prunes stale vectors from Milvus. |
-| `search_documents` | Semantic search across indexed documents. Returns top-k results with relevance scores and file paths.                                   |
-| `clear_index`      | Reset the vector database and tracking state.                                                                                           |
+| Tool                    | Description                                                                                           |
+| ----------------------- | ----------------------------------------------------------------------------------------------------- |
+| `index_documents`       | Blocking index run (legacy-compatible). Returns only when indexing is done.                           |
+| `start_index_documents` | Start a background index job and return immediately with a `job_id`.                                  |
+| `get_index_status`      | Poll a background index job status by `job_id` (or latest when omitted).                              |
+| `search_documents`      | Semantic search across indexed documents. Returns top-k results with relevance scores and file paths. |
+| `clear_index`           | Reset the vector database and tracking state.                                                         |
+
+## Background Indexing (Non-blocking)
+
+`start_index_documents` lets you start indexing without blocking the MCP call.  
+Use `get_index_status` to poll progress and final result.
+
+```mermaid
+sequenceDiagram
+    participant Agent
+    participant MCP as MCP Server
+    participant BG as Background Task
+    participant Milvus
+
+    Agent->>MCP: start_index_documents(dir)
+    MCP-->>Agent: { accepted: true, job_id: "a1b2c3d4" }
+    Note over Agent: Agent is free immediately
+
+    MCP->>BG: asyncio.create_task()
+    BG->>BG: scan → chunk → embed
+    
+    Agent->>MCP: get_index_status(job_id)
+    MCP-->>Agent: { status: "running", progress: 46%, phase: "embed" }
+    
+    BG->>Milvus: batch insert
+    BG->>MCP: job.status = succeeded
+    
+    Agent->>MCP: get_index_status(job_id)
+    MCP-->>Agent: { status: "succeeded", progress: 100% }
+```
+
+### Concurrency Guards
+
+Concurrency is intentionally conservative by default:
+
+- `MARKDOWN_BG_MAX_JOBS=1` — max concurrent index jobs
+- force reindex is rejected while another job is active
+- same target path cannot run two jobs concurrently
+- `recursive=false` is normalized to `recursive=true`
+- `clear_index` is blocked while a background job is active
 
 ## Incremental Indexing & Pruning
 
@@ -450,16 +506,18 @@ No manual cleanup needed — just delete the file and re-index.
 
 ### MCP vs Shell — When to use which?
 
-| Scenario                       | MCP `index_documents` | Shell `reindex.py` |
-| ------------------------------ | :-------------------: | :----------------: |
-| Incremental update (few files) |           ✅           |                    |
-| Full reindex (1000+ files)     |                       |         ✅          |
-| Monorepo / large codebase      |                       |         ✅          |
-| Debugging 429/gRPC errors      |                       |         ✅          |
-| Real-time progress logs        |                       |         ✅          |
-| AI agent automatic execution   |           ✅           |                    |
+| Scenario                             | MCP `index_documents` (blocking) | MCP `start_index_documents` + `get_index_status` | Shell `reindex.py` |
+| ------------------------------------ | :------------------------------: | :----------------------------------------------: | :----------------: |
+| Incremental update (few files)       |                ✅                 |                        ✅                         |                    |
+| Keep agent responsive (non-blocking) |                                  |                        ✅                         |                    |
+| Full reindex (1000+ files)           |                                  |                                                  |         ✅          |
+| Monorepo / large codebase            |                                  |                                                  |         ✅          |
+| Debugging 429/gRPC errors            |                                  |                                                  |         ✅          |
+| Real-time progress logs              |                                  |                                                  |         ✅          |
+| AI agent automatic execution         |                ✅                 |                        ✅                         |                    |
 
-MCP tools (`index_documents`) only return final results — no real-time logs, and long indexing runs risk timeout. `reindex.py` runs directly in the shell with real-time batch progress, errors, and elapsed time.
+MCP background flow (`start_index_documents` + polling) avoids long blocking calls, but still does not stream detailed logs.  
+`reindex.py` remains the best path for very large full rebuilds and troubleshooting runs that need real-time stderr.
 
 ### Usage
 
@@ -532,7 +590,8 @@ Recommended workflow when AI agents (Claude Code, Antigravity, Codex, etc.) use 
 
 **Document RAG Flow**:
 ```
-index_documents(directory, recursive=true) → search_documents(query, k)
+Blocking:  index_documents(directory, recursive=true) → search_documents(query, k)
+Async:     start_index_documents(...) → get_index_status(job_id) → search_documents(query, k)
 ```
 
 **When to use Shell vs MCP**:
@@ -571,6 +630,8 @@ index_documents(directory, recursive=true) → search_documents(query, k)
 | `EMBEDDING_BATCH_DELAY_MS`     | `0`     | Delay between embedding batches (ms). Set to `1000` for rate-limited APIs. |
 | `EMBEDDING_CONCURRENT_BATCHES` | `4`     | Parallel embedding batches                                                 |
 | `MILVUS_INSERT_BATCH`          | `5000`  | Rows per Milvus insert call (gRPC 64MB limit)                              |
+| `MARKDOWN_BG_MAX_JOBS`         | `1`     | Max concurrent active background index jobs                                |
+| `MARKDOWN_BG_JOB_TTL_SECONDS`  | `1800`  | Keep succeeded/failed job metadata in memory for this many seconds         |
 
 ### Exclusions
 
@@ -638,6 +699,7 @@ This project is a fork of [MCP-Markdown-RAG](https://github.com/Zackriya-Solutio
 
 **Key additions over upstream**:
 - Multi-provider embeddings (Vertex AI, Gemini, OpenAI, Voyage)
+- **Async background indexing** with job management and progress polling
 - Single-pass incremental indexing with mtime/size fast-path
 - Stale vector pruning for deleted/moved files
 - Batch embedding with 429 retry + batch Milvus insert (gRPC 64MB limit)

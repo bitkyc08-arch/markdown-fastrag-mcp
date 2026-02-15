@@ -7,11 +7,13 @@ import asyncio
 import json
 import os
 import sys
-import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from typing import Any
+from uuid import uuid4
 
 from fastmcp import FastMCP
 from llama_index.core import SimpleDirectoryReader
@@ -68,6 +70,8 @@ MARKDOWN_CHUNK_OVERLAP = _get_int_env("MARKDOWN_CHUNK_OVERLAP", 100, minimum=0)
 EMBEDDING_BATCH_SIZE = _get_int_env("EMBEDDING_BATCH_SIZE", 250, minimum=1)
 EMBEDDING_BATCH_DELAY_MS = _get_int_env("EMBEDDING_BATCH_DELAY_MS", 0, minimum=0)
 EMBEDDING_CONCURRENT_BATCHES = _get_int_env("EMBEDDING_CONCURRENT_BATCHES", 4, minimum=1)
+MARKDOWN_BG_MAX_JOBS = _get_int_env("MARKDOWN_BG_MAX_JOBS", 1, minimum=1)
+MARKDOWN_BG_JOB_TTL_SECONDS = _get_int_env("MARKDOWN_BG_JOB_TTL_SECONDS", 1800, minimum=1)
 
 
 class VertexEmbeddingFunction:
@@ -228,11 +232,411 @@ print(
     f"batch_delay_ms={EMBEDDING_BATCH_DELAY_MS}",
     file=sys.stderr,
 )
+print(
+    "[Background] "
+    f"max_jobs={MARKDOWN_BG_MAX_JOBS} "
+    f"job_ttl_seconds={MARKDOWN_BG_JOB_TTL_SECONDS}",
+    file=sys.stderr,
+)
 
 # --- Milvus Client ---
 MILVUS_ADDRESS = os.getenv("MILVUS_ADDRESS", os.path.join(INDEX_DATA_PATH, "milvus_markdown.db"))
 milvus_client = MilvusClient(MILVUS_ADDRESS)
 
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _clamp_percent(value: int) -> int:
+    return max(0, min(100, int(value)))
+
+
+def _safe_iso(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return value.isoformat()
+
+
+def _normalize_recursive(recursive: bool) -> tuple[bool, str | None]:
+    if recursive:
+        return True, None
+    warning = "recursive=false is not supported; forcing recursive=true."
+    print(f"[Indexing] {warning}", file=sys.stderr, flush=True)
+    return True, warning
+
+
+@dataclass
+class JobRecord:
+    job_id: str
+    target_path: str
+    status: str = "queued"  # queued | running | succeeded | failed
+    params: dict[str, Any] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=_utc_now)
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    updated_at: datetime = field(default_factory=_utc_now)
+    progress_percent: int = 0
+    phase: str = "pending"  # pending | scan | chunk | embed | insert | done | failed
+    processed_files: int = 0
+    total_files: int = 0
+    processed_chunks: int = 0
+    total_chunks: int = 0
+    result: dict[str, Any] | None = None
+    error: str | None = None
+    note: str | None = None
+
+    def touch(self) -> None:
+        self.updated_at = _utc_now()
+
+
+_jobs: dict[str, JobRecord] = {}
+_job_tasks: dict[str, asyncio.Task] = {}
+_active_targets: set[str] = set()
+_jobs_lock = asyncio.Lock()
+_tracking_lock = asyncio.Lock()
+
+
+def _job_elapsed_seconds(job: JobRecord) -> float:
+    if not job.started_at:
+        return 0.0
+    end = job.finished_at or _utc_now()
+    return round(max(0.0, (end - job.started_at).total_seconds()), 2)
+
+
+def _serialize_job(job: JobRecord) -> dict[str, Any]:
+    return {
+        "job_id": job.job_id,
+        "status": job.status,
+        "phase": job.phase,
+        "progress_percent": job.progress_percent,
+        "processed_files": job.processed_files,
+        "total_files": job.total_files,
+        "processed_chunks": job.processed_chunks,
+        "total_chunks": job.total_chunks,
+        "target_path": job.target_path,
+        "params": job.params,
+        "note": job.note,
+        "result": job.result,
+        "error": job.error,
+        "created_at": _safe_iso(job.created_at),
+        "started_at": _safe_iso(job.started_at),
+        "finished_at": _safe_iso(job.finished_at),
+        "updated_at": _safe_iso(job.updated_at),
+        "elapsed_seconds": _job_elapsed_seconds(job),
+    }
+
+
+def _set_job_progress(
+    job: JobRecord,
+    *,
+    phase: str,
+    percent: int,
+    message: str | None = None,
+    processed_files: int | None = None,
+    total_files: int | None = None,
+    processed_chunks: int | None = None,
+    total_chunks: int | None = None,
+) -> None:
+    job.phase = phase
+    job.progress_percent = _clamp_percent(percent)
+    if message is not None:
+        job.note = message
+    if processed_files is not None:
+        job.processed_files = max(0, processed_files)
+    if total_files is not None:
+        job.total_files = max(0, total_files)
+    if processed_chunks is not None:
+        job.processed_chunks = max(0, processed_chunks)
+    if total_chunks is not None:
+        job.total_chunks = max(0, total_chunks)
+    job.touch()
+
+
+def _cleanup_expired_jobs_locked() -> None:
+    now = _utc_now()
+    expired_job_ids: list[str] = []
+
+    for job_id, job in _jobs.items():
+        if job.status not in {"succeeded", "failed"}:
+            continue
+        if not job.finished_at:
+            continue
+        if (now - job.finished_at).total_seconds() <= MARKDOWN_BG_JOB_TTL_SECONDS:
+            continue
+        task = _job_tasks.get(job_id)
+        if task is not None and not task.done():
+            continue
+        expired_job_ids.append(job_id)
+
+    for job_id in expired_job_ids:
+        _jobs.pop(job_id, None)
+        _job_tasks.pop(job_id, None)
+
+
+def _active_jobs_locked() -> list[JobRecord]:
+    active: list[JobRecord] = []
+    for job_id, job in _jobs.items():
+        task = _job_tasks.get(job_id)
+        if job.status in {"queued", "running"} and (task is None or not task.done()):
+            active.append(job)
+    active.sort(key=lambda item: item.created_at)
+    return active
+
+
+def _latest_job_locked() -> JobRecord | None:
+    if not _jobs:
+        return None
+    return max(_jobs.values(), key=lambda job: job.created_at)
+
+
+async def _run_index_job(
+    target_path: str,
+    recursive: bool,
+    force_reindex: bool,
+    job: JobRecord | None = None,
+) -> dict[str, Any]:
+    if not os.path.exists(target_path):
+        return {"message": "Directory does not exist!"}
+
+    if job is not None:
+        _set_job_progress(job, phase="scan", percent=5, message="Scanning markdown files")
+
+    if force_reindex:
+        if milvus_client.has_collection(COLLECTION_NAME):
+            milvus_client.drop_collection(COLLECTION_NAME)
+        ensure_collection(milvus_client)
+
+        all_files = list_md_files(target_path, recursive=recursive)
+        documents = SimpleDirectoryReader(
+            input_files=all_files, required_exts=[".md"]
+        ).load_data()
+        processed_files = [doc.metadata["file_path"] for doc in documents]
+        pruned_count = 0
+    else:
+        # Protect tracking file read/write operations from concurrent jobs.
+        async with _tracking_lock:
+            changed_files, deleted_files = get_index_delta(target_path, recursive=recursive)
+
+        ensure_collection(milvus_client)
+        pruned_count = 0
+        for file_path in deleted_files:
+            try:
+                milvus_client.delete(
+                    collection_name=COLLECTION_NAME, filter=f"path == '{file_path}'"
+                )
+                pruned_count += 1
+            except Exception:
+                continue
+        if pruned_count > 0:
+            print(
+                f"[Indexer] Pruned {pruned_count} deleted/moved files from index",
+                file=sys.stderr,
+                flush=True,
+            )
+
+        if not changed_files:
+            message = (
+                f"Pruned {pruned_count} deleted/moved files. No new files to index."
+                if pruned_count > 0
+                else "Already up to date, Nothing to index!"
+            )
+            if job is not None:
+                _set_job_progress(
+                    job,
+                    phase="done",
+                    percent=100,
+                    message=message,
+                    processed_files=0,
+                    total_files=0,
+                    processed_chunks=0,
+                    total_chunks=0,
+                )
+            return {"message": message, "pruned_files": pruned_count}
+
+        # Remove old chunks for changed files before inserting fresh embeddings.
+        for file_path in changed_files:
+            try:
+                milvus_client.delete(
+                    collection_name=COLLECTION_NAME, filter=f"path == '{file_path}'"
+                )
+            except Exception:
+                continue
+
+        documents = SimpleDirectoryReader(
+            input_files=changed_files, required_exts=[".md"]
+        ).load_data()
+        processed_files = changed_files
+
+    if job is not None:
+        _set_job_progress(
+            job,
+            phase="chunk",
+            percent=20,
+            message=f"Chunking {len(processed_files)} files",
+            total_files=len(processed_files),
+        )
+
+    # Convert to nodes based on markdown structure, then split larger nodes into chunks.
+    nodes = MarkdownNodeParser(chunk_size=MARKDOWN_CHUNK_SIZE).get_nodes_from_documents(documents)
+    chunk_overlap = min(MARKDOWN_CHUNK_OVERLAP, max(0, MARKDOWN_CHUNK_SIZE - 1))
+    chunked_nodes = TokenTextSplitter(
+        chunk_size=MARKDOWN_CHUNK_SIZE, chunk_overlap=chunk_overlap
+    ).get_nodes_from_documents(nodes)
+    chunked_nodes = [node for node in chunked_nodes if node.text.strip()]
+
+    # Extract text from nodes and embed (parallel batches for speed).
+    texts = [node.text for node in chunked_nodes]
+    batches = [texts[i: i + EMBEDDING_BATCH_SIZE] for i in range(0, len(texts), EMBEDDING_BATCH_SIZE)]
+    total_batches = len(batches)
+    print(
+        f"[Embedding] {len(texts)} chunks in {total_batches} batches "
+        f"(size={EMBEDDING_BATCH_SIZE}, concurrent={EMBEDDING_CONCURRENT_BATCHES})",
+        file=sys.stderr,
+        flush=True,
+    )
+
+    if job is not None:
+        job.total_chunks = len(texts)
+        job.touch()
+
+    vectors: list[list[float]] = [None] * len(texts)  # type: ignore[assignment]
+    executor = ThreadPoolExecutor(max_workers=EMBEDDING_CONCURRENT_BATCHES)
+    loop = asyncio.get_running_loop()
+
+    async def embed_one(batch_idx: int, batch: list[str], offset: int) -> None:
+        print(
+            f"[Embedding] batch {batch_idx + 1}/{total_batches} "
+            f"({offset}~{offset + len(batch)}/{len(texts)})",
+            file=sys.stderr,
+            flush=True,
+        )
+        result = await loop.run_in_executor(executor, embedding_fn.encode_documents, batch)
+        for j, vec in enumerate(result):
+            vectors[offset + j] = vec
+
+    # Process in waves of EMBEDDING_CONCURRENT_BATCHES.
+    for wave_start in range(0, total_batches, EMBEDDING_CONCURRENT_BATCHES):
+        wave = []
+        wave_end = min(wave_start + EMBEDDING_CONCURRENT_BATCHES, total_batches)
+        for k in range(wave_start, wave_end):
+            offset = k * EMBEDDING_BATCH_SIZE
+            wave.append(embed_one(k, batches[k], offset))
+        await asyncio.gather(*wave)
+
+        if job is not None and total_batches > 0:
+            completed_batches = wave_end
+            processed_chunks = min(completed_batches * EMBEDDING_BATCH_SIZE, len(texts))
+            embed_percent = 20 + int((completed_batches / total_batches) * 60)
+            _set_job_progress(
+                job,
+                phase="embed",
+                percent=embed_percent,
+                message=f"Embedding batch {completed_batches}/{total_batches}",
+                processed_chunks=processed_chunks,
+                total_chunks=len(texts),
+            )
+
+        if EMBEDDING_BATCH_DELAY_MS > 0:
+            await asyncio.sleep(EMBEDDING_BATCH_DELAY_MS / 1000.0)
+
+    executor.shutdown(wait=False)
+    data = [
+        {
+            "vector": vector,
+            "text": node.text,
+            "filename": node.metadata["file_name"],
+            "path": node.metadata["file_path"],
+        }
+        for vector, node in zip(vectors, chunked_nodes)
+    ]
+    milvus_insert_batch = _get_int_env("MILVUS_INSERT_BATCH", 5000, minimum=1)
+    total_insert_batches = max(1, (len(data) + milvus_insert_batch - 1) // milvus_insert_batch)
+    res: dict[str, Any] = {}
+
+    for insert_idx, i in enumerate(range(0, len(data), milvus_insert_batch), start=1):
+        batch = data[i: i + milvus_insert_batch]
+        res = milvus_client.insert(collection_name=COLLECTION_NAME, data=batch)
+        if job is not None:
+            insert_percent = 80 + int((insert_idx / total_insert_batches) * 15)
+            _set_job_progress(
+                job,
+                phase="insert",
+                percent=insert_percent,
+                message=f"Inserting batch {insert_idx}/{total_insert_batches}",
+                processed_chunks=len(data),
+                total_chunks=len(texts),
+            )
+
+    # Protect tracking file write from concurrent jobs.
+    async with _tracking_lock:
+        update_tracking_file(processed_files)
+
+    result = {
+        **res,
+        "message": "Full reindex" if force_reindex else "Incremental update",
+        "processed_files": len(processed_files),
+        "total_chunks": len(chunked_nodes),
+        "files": [os.path.basename(f) for f in processed_files],
+        "pruned_files": pruned_count,
+    }
+
+    if job is not None:
+        _set_job_progress(
+            job,
+            phase="done",
+            percent=100,
+            message="Index job completed",
+            processed_files=len(processed_files),
+            total_files=len(processed_files),
+            processed_chunks=len(chunked_nodes),
+            total_chunks=len(chunked_nodes),
+        )
+
+    return result
+
+
+async def _execute_index_job(
+    job_id: str,
+    target_path: str,
+    recursive: bool,
+    force_reindex: bool,
+) -> None:
+    async with _jobs_lock:
+        job = _jobs.get(job_id)
+        if job is None:
+            return
+        job.status = "running"
+        job.started_at = _utc_now()
+        job.touch()
+        _set_job_progress(job, phase="scan", percent=3, message="Background job started")
+
+    try:
+        result = await _run_index_job(
+            target_path=target_path,
+            recursive=recursive,
+            force_reindex=force_reindex,
+            job=job,
+        )
+        job.result = result
+        if job.status != "failed":
+            job.status = "succeeded"
+        if job.progress_percent < 100:
+            _set_job_progress(job, phase="done", percent=100, message="Index job completed")
+    except Exception as exc:
+        job.status = "failed"
+        job.phase = "failed"
+        job.error = str(exc)
+        job.touch()
+        print(f"[Background] Job {job_id} failed: {exc}", file=sys.stderr, flush=True)
+    finally:
+        async with _jobs_lock:
+            finished = _jobs.get(job_id)
+            if finished is not None:
+                finished.finished_at = _utc_now()
+                finished.touch()
+            _active_targets.discard(target_path)
+            _cleanup_expired_jobs_locked()
 
 def search(query: str, k: int) -> list[list[SearchResult]]:
     query_vectors = embedding_fn.encode_queries([query])
@@ -256,120 +660,140 @@ async def index_documents(
     recursive: bool = Field(True, description="Recursively index subdirectories"),
     force_reindex: bool = Field(False, description="Force reindex"),
 ):
-    # TODO: Implement Client Elicitation when it is available in Popular clients
     target_path = os.path.join(current_working_directory, directory)
+    recursive, recursive_warning = _normalize_recursive(recursive)
+    result = await _run_index_job(
+        target_path=target_path,
+        recursive=recursive,
+        force_reindex=force_reindex,
+        job=None,
+    )
+    if recursive_warning:
+        result["warning"] = recursive_warning
+    return result
+
+
+@mcp.tool(
+    name="start_index_documents",
+    description="Start a background markdown indexing job and return immediately.",
+    tags={"index", "background", "async"},
+)
+async def start_index_documents(
+    current_working_directory: str = Field(description="Current working directory"),
+    directory: str = Field("", description="Directory to index"),
+    recursive: bool = Field(True, description="Recursively index subdirectories"),
+    force_reindex: bool = Field(False, description="Force reindex"),
+):
+    target_path = os.path.join(current_working_directory, directory)
+    recursive, recursive_warning = _normalize_recursive(recursive)
 
     if not os.path.exists(target_path):
-        return {"message": "Directory does not exist!"}
-
-    if force_reindex:
-        if milvus_client.has_collection(COLLECTION_NAME):
-            milvus_client.drop_collection(COLLECTION_NAME)
-        ensure_collection(milvus_client)
-
-        all_files = list_md_files(target_path, recursive=recursive)
-        documents = SimpleDirectoryReader(
-            input_files=all_files, required_exts=[".md"]
-        ).load_data()
-        processed_files = [doc.metadata["file_path"] for doc in documents]
-
-    else:
-        # Single-pass delta scan (changed + deleted) for faster incremental indexing.
-        changed_files, deleted_files = get_index_delta(target_path, recursive=recursive)
-        ensure_collection(milvus_client)
-        pruned_count = 0
-        for file_path in deleted_files:
-            try:
-                milvus_client.delete(
-                    collection_name=COLLECTION_NAME, filter=f"path == '{file_path}'"
-                )
-                pruned_count += 1
-            except Exception:
-                continue
-        if pruned_count > 0:
-            print(f"[Indexer] Pruned {pruned_count} deleted/moved files from index", file=sys.stderr, flush=True)
-
-        if not changed_files:
-            if pruned_count > 0:
-                return {"message": f"Pruned {pruned_count} deleted/moved files. No new files to index."}
-            return {"message": "Already up to date, Nothing to index!"}
-        # Needs to delete the old chunks related to changed files
-        for file_path in changed_files:
-            try:
-                milvus_client.delete(
-                    collection_name=COLLECTION_NAME, filter=f"path == '{file_path}'"
-                )
-            except Exception:
-                continue
-
-        # Load only changed files to index
-        documents = SimpleDirectoryReader(
-            input_files=changed_files, required_exts=[".md"]
-        ).load_data()
-        # Update tracking file
-        processed_files = changed_files
-
-    # Convert to nodes based on markdown structure, then split larger nodes into chunks
-    # MarkdownNodeParser respects chunk_size as max size per section
-    nodes = MarkdownNodeParser(chunk_size=MARKDOWN_CHUNK_SIZE).get_nodes_from_documents(documents)
-    chunk_overlap = min(MARKDOWN_CHUNK_OVERLAP, max(0, MARKDOWN_CHUNK_SIZE - 1))
-    chunked_nodes = TokenTextSplitter(
-        chunk_size=MARKDOWN_CHUNK_SIZE, chunk_overlap=chunk_overlap
-    ).get_nodes_from_documents(nodes)
-    chunked_nodes = [node for node in chunked_nodes if node.text.strip()]
-
-    # Extract text from nodes and embed (parallel batches for speed)
-    texts = [node.text for node in chunked_nodes]
-    batches = [texts[i : i + EMBEDDING_BATCH_SIZE] for i in range(0, len(texts), EMBEDDING_BATCH_SIZE)]
-    total_batches = len(batches)
-    print(f"[Embedding] {len(texts)} chunks in {total_batches} batches (size={EMBEDDING_BATCH_SIZE}, concurrent={EMBEDDING_CONCURRENT_BATCHES})", file=sys.stderr, flush=True)
-
-    vectors: list[list[float]] = [None] * len(texts)  # type: ignore[assignment]
-    executor = ThreadPoolExecutor(max_workers=EMBEDDING_CONCURRENT_BATCHES)
-    loop = asyncio.get_event_loop()
-
-    async def embed_one(batch_idx: int, batch: list[str], offset: int) -> None:
-        print(f"[Embedding] batch {batch_idx+1}/{total_batches} ({offset}~{offset+len(batch)}/{len(texts)})", file=sys.stderr, flush=True)
-        result = await loop.run_in_executor(executor, embedding_fn.encode_documents, batch)
-        for j, vec in enumerate(result):
-            vectors[offset + j] = vec
-
-    # Process in waves of EMBEDDING_CONCURRENT_BATCHES
-    for wave_start in range(0, total_batches, EMBEDDING_CONCURRENT_BATCHES):
-        wave = []
-        for k in range(wave_start, min(wave_start + EMBEDDING_CONCURRENT_BATCHES, total_batches)):
-            offset = k * EMBEDDING_BATCH_SIZE
-            wave.append(embed_one(k, batches[k], offset))
-        await asyncio.gather(*wave)
-        if EMBEDDING_BATCH_DELAY_MS > 0:
-            await asyncio.sleep(EMBEDDING_BATCH_DELAY_MS / 1000.0)
-
-    executor.shutdown(wait=False)
-    data = [
-        {
-            "vector": vector,
-            "text": node.text,
-            "filename": node.metadata["file_name"],
-            "path": node.metadata["file_path"],
+        return {
+            "accepted": False,
+            "status": "rejected",
+            "message": "Directory does not exist!",
+            "job_id": None,
         }
-        for vector, node in zip(vectors, chunked_nodes)
-    ]
-    MILVUS_INSERT_BATCH = int(os.getenv("MILVUS_INSERT_BATCH", "5000"))
-    res = {}
-    for i in range(0, len(data), MILVUS_INSERT_BATCH):
-        batch = data[i : i + MILVUS_INSERT_BATCH]
-        res = milvus_client.insert(collection_name=COLLECTION_NAME, data=batch)
 
-    # Update tracking file
-    update_tracking_file(processed_files)
+    async with _jobs_lock:
+        _cleanup_expired_jobs_locked()
+        active_jobs = _active_jobs_locked()
 
-    return {
-        **res,
-        "message": "Full reindex" if force_reindex else "Incremental update",
-        "processed_files": len(processed_files),
-        "total_chunks": len(chunked_nodes),
-        "files": [os.path.basename(f) for f in processed_files],
-    }
+        if force_reindex and active_jobs:
+            current = _serialize_job(active_jobs[0])
+            return {
+                "accepted": False,
+                "status": "rejected",
+                "message": "Cannot force reindex while another index job is active.",
+                "job_id": None,
+                "current_job": current,
+            }
+
+        if len(active_jobs) >= MARKDOWN_BG_MAX_JOBS:
+            current = _serialize_job(active_jobs[0])
+            return {
+                "accepted": False,
+                "status": "rejected",
+                "message": (
+                    f"Maximum active index jobs reached "
+                    f"({len(active_jobs)}/{MARKDOWN_BG_MAX_JOBS})."
+                ),
+                "job_id": None,
+                "current_job": current,
+            }
+
+        if target_path in _active_targets:
+            same_target = next((job for job in active_jobs if job.target_path == target_path), None)
+            current = _serialize_job(same_target) if same_target else None
+            return {
+                "accepted": False,
+                "status": "rejected",
+                "message": "An index job for the same target path is already active.",
+                "job_id": None,
+                "current_job": current,
+            }
+
+        job_id = uuid4().hex[:8]
+        params = {
+            "current_working_directory": current_working_directory,
+            "directory": directory,
+            "recursive": recursive,
+            "force_reindex": force_reindex,
+        }
+        job = JobRecord(job_id=job_id, target_path=target_path, params=params, note=recursive_warning)
+        _jobs[job_id] = job
+        _active_targets.add(target_path)
+
+        task = asyncio.create_task(
+            _execute_index_job(
+                job_id=job_id,
+                target_path=target_path,
+                recursive=recursive,
+                force_reindex=force_reindex,
+            )
+        )
+        _job_tasks[job_id] = task
+
+        response: dict[str, Any] = {
+            "accepted": True,
+            "status": "queued",
+            "message": "Index job accepted and queued.",
+            "job_id": job_id,
+            "started_at": _safe_iso(job.started_at),
+            "created_at": _safe_iso(job.created_at),
+        }
+        if recursive_warning:
+            response["warning"] = recursive_warning
+        return response
+
+
+@mcp.tool(
+    name="get_index_status",
+    description="Get current status for a background markdown indexing job.",
+    tags={"index", "background", "status"},
+)
+async def get_index_status(
+    job_id: str = Field("", description="Background job ID; empty returns latest job."),
+):
+    lookup_id = job_id.strip()
+
+    async with _jobs_lock:
+        _cleanup_expired_jobs_locked()
+        active_jobs = _active_jobs_locked()
+
+        job = _jobs.get(lookup_id) if lookup_id else _latest_job_locked()
+        if job is None:
+            return {
+                "found": False,
+                "message": "No indexing jobs found.",
+                "job_id": None,
+                "active_jobs": 0,
+            }
+
+        payload = _serialize_job(job)
+        payload["found"] = True
+        payload["active_jobs"] = len(active_jobs)
+        return payload
 
 
 @mcp.tool(
@@ -399,9 +823,20 @@ async def search_documents(
     tags={"clear", "reset"},
 )
 async def clear_index():
+    async with _jobs_lock:
+        _cleanup_expired_jobs_locked()
+        active_jobs = _active_jobs_locked()
+        if active_jobs:
+            return {
+                "message": "Cannot clear index while background indexing is active.",
+                "active_jobs": len(active_jobs),
+                "current_job": _serialize_job(active_jobs[0]),
+            }
+
     ensure_collection(milvus_client)
     res = milvus_client.delete(collection_name=COLLECTION_NAME, filter="id >= 0")
-    update_tracking_file([], is_clear=True)
+    async with _tracking_lock:
+        update_tracking_file([], is_clear=True)
     return res
 
 
