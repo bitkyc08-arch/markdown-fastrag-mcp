@@ -341,7 +341,11 @@ async def index_documents(
         }
         for vector, node in zip(vectors, chunked_nodes)
     ]
-    res = milvus_client.insert(collection_name=COLLECTION_NAME, data=data)
+    MILVUS_INSERT_BATCH = int(os.getenv("MILVUS_INSERT_BATCH", "5000"))
+    res = {}
+    for i in range(0, len(data), MILVUS_INSERT_BATCH):
+        batch = data[i : i + MILVUS_INSERT_BATCH]
+        res = milvus_client.insert(collection_name=COLLECTION_NAME, data=batch)
 
     # Update tracking file
     update_tracking_file(processed_files)

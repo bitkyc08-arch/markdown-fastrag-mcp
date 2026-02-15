@@ -64,6 +64,10 @@ _DEFAULT_EXCLUDE_DIRS = {"node_modules", "__pycache__", "devlog", "_legacy", "di
 _extra = os.getenv("MARKDOWN_EXCLUDE_DIRS", "")
 EXCLUDE_DIRS = _DEFAULT_EXCLUDE_DIRS | (set(_extra.split(",")) if _extra else set())
 
+_DEFAULT_EXCLUDE_FILES = {"AGENTS.md", "CLAUDE.md", "GEMINI.md"}
+_extra_files = os.getenv("MARKDOWN_EXCLUDE_FILES", "")
+EXCLUDE_FILES = _DEFAULT_EXCLUDE_FILES | (set(_extra_files.split(",")) if _extra_files else set())
+
 
 def list_md_files(base_dir: str, recursive: bool = False) -> list[str]:
     md_files = []
@@ -71,11 +75,11 @@ def list_md_files(base_dir: str, recursive: bool = False) -> list[str]:
         for root, dirs, files in os.walk(base_dir):
             dirs[:] = [d for d in dirs if not d.startswith(".") and d not in EXCLUDE_DIRS]
             for file in files:
-                if file.endswith(".md"):
+                if file.endswith(".md") and file not in EXCLUDE_FILES:
                     md_files.append(os.path.join(root, file))
     else:
         for file in os.listdir(base_dir):
-            if file.endswith(".md"):
+            if file.endswith(".md") and file not in EXCLUDE_FILES:
                 md_files.append(os.path.join(base_dir, file))
     return md_files
 
