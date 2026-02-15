@@ -19,6 +19,32 @@ graph LR
     M --> V["Shared Document Index"]
 ```
 
+## Quick Start
+
+```bash
+pip install markdown-fastrag-mcp
+```
+
+Add to your MCP host config:
+
+```json
+{
+  "mcpServers": {
+    "markdown-rag": {
+      "command": "uvx",
+      "args": ["markdown-fastrag-mcp"],
+      "env": {
+        "EMBEDDING_PROVIDER": "gemini",
+        "GEMINI_API_KEY": "${GEMINI_API_KEY}",
+        "MILVUS_ADDRESS": "http://localhost:19530"
+      }
+    }
+  }
+}
+```
+
+> **Tip**: Omit `MILVUS_ADDRESS` for local-only use (defaults to SQLite-based Milvus Lite).
+
 ## Features
 
 - **Semantic matching** — finds conceptually related content, not just keyword hits
@@ -94,46 +120,10 @@ flowchart LR
     style PRUNE fill:#742a2a,color:#fed7d7
 ```
 
-## Quick Start
-
-### Install
-
-```bash
-pip install markdown-fastrag-mcp
-```
-
-Or with [uv](https://docs.astral.sh/uv/):
-
-```bash
-uv pip install markdown-fastrag-mcp
-```
-
-### Configure
-
-Add to your MCP host config:
-
-```json
-{
-  "mcpServers": {
-    "markdown-rag": {
-      "command": "uvx",
-      "args": ["markdown-fastrag-mcp"],
-      "env": {
-        "EMBEDDING_PROVIDER": "gemini",
-        "EMBEDDING_MODEL": "gemini-embedding-001",
-        "EMBEDDING_DIM": "768",
-        "GEMINI_API_KEY": "${GEMINI_API_KEY}",
-        "MILVUS_ADDRESS": "http://localhost:19530"
-      }
-    }
-  }
-}
-```
-
-> **Tip**: For local-only use (no Docker), omit `MILVUS_ADDRESS` — it defaults to a local SQLite-based Milvus Lite file.
+## Install Options
 
 <details>
-<summary><strong>Alternative: Install from source</strong></summary>
+<summary><strong>Install from source</strong></summary>
 
 ```bash
 git clone https://github.com/bitkyc08-arch/markdown-fastrag-mcp.git
@@ -141,7 +131,7 @@ cd markdown-fastrag-mcp
 uv sync
 ```
 
-Then use `--directory` in your MCP config:
+Use `--directory` in your MCP config:
 
 ```json
 {
