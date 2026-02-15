@@ -1,53 +1,35 @@
-<div align="center">
-  <img src="docs/banner.png" alt="MCP-Markdown-RAG" width="800" style="border-radius:10px;"/>
-  <h1>MCP-Markdown-RAG</h1>
-  <p>
-  <img alt="GitHub forks" src="https://img.shields.io/github/forks/bitkyc08-arch/mcp-markdown-rag"/>
-  <img alt="GitHub Repo stars" src="https://img.shields.io/github/stars/bitkyc08-arch/mcp-markdown-rag">
-  <img alt="GitHub last commit" src="https://img.shields.io/github/last-commit/bitkyc08-arch/mcp-markdown-rag">
-</p>
-<p>
-  <a href="LICENSE">
-    <img src="https://img.shields.io/badge/License-Apache%202.0-green" alt="License" />
-  </a>
-  <img src="https://img.shields.io/badge/MCP-Server-blue"/>
-</p>
-</div>
+# MCP-Markdown-RAG
 
-> **Fork of [Zackriya-Solutions/MCP-Markdown-RAG](https://github.com/Zackriya-Solutions/MCP-Markdown-RAG)**
-> with multi-provider embedding support and configurable Milvus address.
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-green)](LICENSE)
+[![MCP Server](https://img.shields.io/badge/MCP-Server-blue)](https://modelcontextprotocol.io)
+[![Python](https://img.shields.io/badge/Python-%3E%3D3.10-blue.svg)](https://python.org/)
 
-A **Model Context Protocol (MCP)** server that provides a **RAG engine** for your markdown documents. This server uses a Milvus vector database to index your notes, enabling Large Language Models (LLMs) to perform semantic search and retrieve relevant content from your files.
+A semantic search engine for your markdown documents. An MCP server that indexes notes, docs, and knowledge bases into a Milvus vector database, letting AI assistants find relevant content by **meaning**.
 
-## What's Different in This Fork
+> Ask *"what are the tradeoffs of microservices?"* and find your notes about service boundaries, distributed systems, and API design — even if none of them mention "microservices."
 
-| Feature | Upstream | This Fork |
-|---------|----------|-----------|
-| Embedding provider | Local model only | **Gemini, OpenAI, OpenAI-compatible, Vertex AI, Voyage, Local** |
-| Milvus address | Local file DB only | **Configurable** via `MILVUS_ADDRESS` env var |
-| Embedding dimension | Fixed 768 | **Configurable** via `EMBEDDING_DIM` env var |
-| Batch embedding | N/A | **Batched** (100 per request) to stay under API limits |
+## Why
 
-## Key Features
+AI assistants are limited by their context window. Instead of feeding entire document collections, this server lets them retrieve only the relevant sections:
 
-- **Semantic Search for Markdown**: Find document sections based on conceptual meaning, not just keywords.
-- **Multi-Provider Embeddings**: Choose between Gemini, OpenAI, OpenAI-compatible providers, Vertex AI, Voyage AI, or the default local model.
-- **Incremental Indexing**: Only re-indexes changed files by comparing hashes and timestamps.
-- **MCP Compatible**: Integrates with any MCP-supported host (Claude Code, Claude Desktop, Windsurf, Cursor, etc.).
+- **Semantic matching** — finds conceptually related content, not just keyword hits
+- **Multi-provider embeddings** — Gemini, OpenAI, Vertex AI, Voyage, or local models
+- **Incremental indexing** — only re-indexes changed files by comparing hashes
+- **MCP native** — works with any MCP host (Claude Code, Cursor, Windsurf, VS Code, etc.)
 
-## Installation & Setup
+## Quick Start
 
-Requires **uv** (Python package manager).
+Requires [uv](https://docs.astral.sh/uv/) (Python package manager).
 
-### Step 1: Clone
+### 1. Clone
 
 ```bash
 git clone https://github.com/bitkyc08-arch/mcp-markdown-rag.git
 ```
 
-### Step 2: Configure Your Host App
+### 2. Configure
 
-Add to your MCP host configuration:
+Add to your MCP host config:
 
 ```json
 {
@@ -55,15 +37,12 @@ Add to your MCP host configuration:
     "markdown-rag": {
       "command": "uv",
       "args": [
-        "--directory",
-        "/ABSOLUTE/PATH/TO/mcp-markdown-rag",
-        "run",
-        "server.py"
+        "--directory", "/path/to/mcp-markdown-rag",
+        "run", "server.py"
       ],
       "env": {
         "EMBEDDING_PROVIDER": "gemini",
         "EMBEDDING_MODEL": "gemini-embedding-001",
-        "EMBEDDING_DIM": "768",
         "GEMINI_API_KEY": "${GEMINI_API_KEY}"
       }
     }
@@ -71,7 +50,41 @@ Add to your MCP host configuration:
 }
 ```
 
-> Replace `/ABSOLUTE/PATH/TO/mcp-markdown-rag` with the actual path.
+## Embedding Providers
+
+| Provider | `EMBEDDING_PROVIDER` | Required Env | Auth |
+|----------|----------------------|--------------|------|
+| **Gemini** | `gemini` | `GEMINI_API_KEY` | API key |
+| **OpenAI** | `openai` | `OPENAI_API_KEY` | API key |
+| **OpenAI-compatible** | `openai-compatible` | `EMBEDDING_API_KEY`, `EMBEDDING_BASE_URL` | API key |
+| **Vertex AI** | `vertex` | `GOOGLE_APPLICATION_CREDENTIALS`, `VERTEX_PROJECT` | OAuth (auto-refresh) |
+| **Voyage** | `voyage` | `VOYAGE_API_KEY` | API key |
+| **Local** | `local` | — | — |
+
+## Tools
+
+| Tool | Description |
+|------|-------------|
+| `index_documents` | Index markdown files. Supports recursive directory scanning and incremental updates. |
+| `search_documents` | Semantic search across indexed documents. Returns top-k results with relevance scores. |
+| `clear_index` | Reset the vector database and tracking state. |
+
+## Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `EMBEDDING_PROVIDER` | `local` | Provider: `gemini`, `openai`, `openai-compatible`, `vertex`, `voyage`, `local` |
+| `EMBEDDING_MODEL` | (provider default) | Model name override |
+| `EMBEDDING_DIM` | `768` | Vector dimension |
+| `MILVUS_ADDRESS` | `.db/milvus_markdown.db` | Milvus server address or local file path |
+| `GEMINI_API_KEY` | — | Gemini API key |
+| `OPENAI_API_KEY` | — | OpenAI API key |
+| `VOYAGE_API_KEY` | — | Voyage API key |
+| `EMBEDDING_API_KEY` | — | OpenAI-compatible API key |
+| `EMBEDDING_BASE_URL` | — | OpenAI-compatible base URL |
+| `GOOGLE_APPLICATION_CREDENTIALS` | — | Service account JSON for Vertex |
+| `VERTEX_PROJECT` | (auto) | GCP project ID |
+| `VERTEX_LOCATION` | `us-central1` | Vertex AI region |
 
 ### Vertex AI Example
 
@@ -80,17 +93,11 @@ Add to your MCP host configuration:
   "mcpServers": {
     "markdown-rag": {
       "command": "uv",
-      "args": [
-        "--directory",
-        "/ABSOLUTE/PATH/TO/mcp-markdown-rag",
-        "run",
-        "server.py"
-      ],
+      "args": ["--directory", "/path/to/mcp-markdown-rag", "run", "server.py"],
       "env": {
         "EMBEDDING_PROVIDER": "vertex",
         "EMBEDDING_MODEL": "gemini-embedding-001",
-        "EMBEDDING_DIM": "768",
-        "GOOGLE_APPLICATION_CREDENTIALS": "/ABSOLUTE/PATH/service-account.json",
+        "GOOGLE_APPLICATION_CREDENTIALS": "/path/to/service-account.json",
         "VERTEX_PROJECT": "your-gcp-project-id",
         "VERTEX_LOCATION": "us-central1"
       }
@@ -99,58 +106,16 @@ Add to your MCP host configuration:
 }
 ```
 
-This uses Application Default Credentials (ADC), refreshes an OAuth token automatically, and calls the Vertex AI native predict endpoint (`publishers/google/models/{model}:predict`).
-
-## Provider Matrix
-
-| Provider | `EMBEDDING_PROVIDER` | Required env | Base URL | Auth |
-|----------|----------------------|--------------|----------|------|
-| OpenAI | `openai` | `OPENAI_API_KEY` | Default | API key |
-| OpenAI-compatible | `openai-compatible` | `EMBEDDING_API_KEY`, `EMBEDDING_BASE_URL` | Custom | API key |
-| Gemini | `gemini` | `GEMINI_API_KEY` | Google AI Studio | API key |
-| Vertex AI | `vertex` | `GOOGLE_APPLICATION_CREDENTIALS`, `VERTEX_PROJECT`, `VERTEX_LOCATION` | Vertex AI native predict API | OAuth token (auto-refresh) |
-| Voyage | `voyage` | `VOYAGE_API_KEY` | Default | API key |
-| Local | `local` | — | — | — |
-
-## Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `EMBEDDING_PROVIDER` | `local` | Embedding provider: `openai`, `openai-compatible`, `gemini`, `vertex`, `voyage`, or `local` |
-| `EMBEDDING_MODEL` | (provider default) | Model name override (e.g. `text-embedding-3-small`, `gemini-embedding-001`, `voyage-3`) |
-| `EMBEDDING_DIM` | `768` | Embedding vector dimension |
-| `EMBEDDING_API_KEY` | — | API key for `openai-compatible` provider |
-| `EMBEDDING_BASE_URL` | — | Base URL for `openai-compatible` provider |
-| `GEMINI_API_KEY` | — | API key for Gemini provider |
-| `VOYAGE_API_KEY` | — | API key for Voyage provider |
-| `OPENAI_API_KEY` | — | API key for OpenAI provider |
-| `GOOGLE_APPLICATION_CREDENTIALS` | — | Service account JSON path for Vertex ADC |
-| `VERTEX_PROJECT` | (auto-detected) | GCP project ID used in Vertex native predict path |
-| `VERTEX_LOCATION` | `us-central1` | Vertex AI region in native predict endpoint |
-| `MILVUS_ADDRESS` | `.db/milvus_markdown.db` | Milvus server address or local file path |
-
-## Available Tools
-
-- **`index_documents`** — Index markdown files for semantic search.
-  - `current_working_directory` (string, required): Base directory path.
-  - `directory` (string, optional): Subdirectory to index. Defaults to `""`.
-  - `recursive` (boolean, optional): Recursively index subdirectories. Defaults to `false`.
-  - `force_reindex` (boolean, optional): Clear and rebuild index. Defaults to `false`.
-
-- **`search_documents`** — Search indexed documents by semantic similarity.
-  - `query` (string, required): Natural language query.
-  - `k` (integer, optional): Number of results to return. Defaults to `5`.
-
-- **`clear_index`** — Clear the vector database and reset tracking.
-
 ## Debugging
 
 ```bash
-npx @modelcontextprotocol/inspector uv --directory /ABSOLUTE/PATH/TO/mcp-markdown-rag run server.py
+npx @modelcontextprotocol/inspector uv --directory /path/to/mcp-markdown-rag run server.py
 ```
 
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE).
 
-This is a fork of [Zackriya-Solutions/MCP-Markdown-RAG](https://github.com/Zackriya-Solutions/MCP-Markdown-RAG). See individual source files for modification notices as required by the Apache 2.0 license.
+---
+
+*Built on [MCP-Markdown-RAG](https://github.com/Zackriya-Solutions/MCP-Markdown-RAG) by Zackriya Solutions. Extended with multi-provider embeddings, configurable Milvus, batch processing, and incremental indexing.*

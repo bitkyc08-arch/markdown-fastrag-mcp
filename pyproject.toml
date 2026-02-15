@@ -1,11 +1,11 @@
-# Modified from original MCP-Markdown-RAG by Zackriya Solutions
+# Built on MCP-Markdown-RAG by Zackriya Solutions
 # (https://github.com/Zackriya-Solutions/MCP-Markdown-RAG)
-# Changes: added voyageai and openai dependencies for multi-provider support.
+# Extended with multi-provider embeddings, configurable Milvus, and batch processing.
 
 [project]
 name = "mcp-markdown-rag"
-version = "0.2.0"
-description = "Markdown based RAG system"
+version = "1.0.0"
+description = "Semantic search engine for markdown documents. MCP server with multi-provider embeddings and Milvus vector storage."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
