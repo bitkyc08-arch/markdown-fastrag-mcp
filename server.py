@@ -372,10 +372,12 @@ async def search_documents(
 
     return "\n---\n".join(
         [
-            f"File: **{res.entity.filename}**\n---\nText: {res.entity.text}\n---\n"
+            f"File: **{res.entity.filename}** (relevance: {res.distance:.1%})\n"
+            f"Path: `{res.entity.path}`\n---\n"
+            f"Text: {res.entity.text}\n---\n"
             for res in results[0]
         ]
-    )  # Iterate through the relevent docs and append the text
+    )
 
 
 @mcp.tool(
