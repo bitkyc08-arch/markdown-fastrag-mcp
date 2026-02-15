@@ -488,21 +488,6 @@ async def _run_index_job(
             total_files=len(processed_files),
         )
 
-    # Pre-process: strip YAML frontmatter from documents BEFORE chunking.
-    # LlamaIndex propagates doc.metadata to all child nodes automatically.
-    from chunking import (
-        _normalize_meta,
-        inject_header_prefix,
-        merge_small_chunks,
-        strip_frontmatter,
-    )
-
-    for doc in documents:
-        clean_text, fm = strip_frontmatter(doc.text)
-        doc.text = clean_text
-        doc.metadata["tags"] = _normalize_meta(fm.get("tags"))
-        doc.metadata["aliases"] = _normalize_meta(fm.get("aliases"))
-
     # Convert to nodes based on markdown structure, then split larger nodes into chunks.
     nodes = MarkdownNodeParser(chunk_size=MARKDOWN_CHUNK_SIZE).get_nodes_from_documents(documents)
     chunk_overlap = min(MARKDOWN_CHUNK_OVERLAP, max(0, MARKDOWN_CHUNK_SIZE - 1))
@@ -511,7 +496,26 @@ async def _run_index_job(
     ).get_nodes_from_documents(nodes)
     chunked_nodes = [node for node in chunked_nodes if node.text.strip()]
 
-    # Post-process: merge small chunks + inject parent header context.
+    # Post-process: strip frontmatter + merge small chunks + inject parent header context.
+    from chunking import (
+        _normalize_meta,
+        inject_header_prefix,
+        merge_small_chunks,
+        strip_frontmatter,
+    )
+
+    # Strip YAML frontmatter from nodes and collect tags/aliases per file.
+    file_meta: dict[str, dict[str, str]] = {}  # path -> {tags, aliases}
+    for node in chunked_nodes:
+        fp = node.metadata.get("file_path", "")
+        clean_text, fm = strip_frontmatter(node.text)
+        node.text = clean_text
+        if fp not in file_meta and fm:
+            file_meta[fp] = {
+                "tags": _normalize_meta(fm.get("tags")),
+                "aliases": _normalize_meta(fm.get("aliases")),
+            }
+
     if MIN_CHUNK_TOKENS > 0:
         chunked_nodes = merge_small_chunks(
             chunked_nodes, MIN_CHUNK_TOKENS, MARKDOWN_CHUNK_SIZE
@@ -580,8 +584,8 @@ async def _run_index_job(
             "text": node.text,
             "filename": node.metadata["file_name"],
             "path": node.metadata["file_path"],
-            "tags": node.metadata.get("tags", ""),
-            "aliases": node.metadata.get("aliases", ""),
+            "tags": file_meta.get(node.metadata["file_path"], {}).get("tags", ""),
+            "aliases": file_meta.get(node.metadata["file_path"], {}).get("aliases", ""),
         }
         for vector, node in zip(vectors, chunked_nodes)
     ]

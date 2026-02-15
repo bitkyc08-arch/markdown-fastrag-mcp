@@ -18,7 +18,7 @@ sys.path.insert(0, PROJECT_DIR)
 
 # env 기본값 (server.py와 동일 — 없으면 server.py 기본값 사용)
 os.environ.setdefault("EMBEDDING_BATCH_SIZE", "100")
-os.environ.setdefault("EMBEDDING_CONCURRENT_BATCHES", "3")
+os.environ.setdefault("EMBEDDING_CONCURRENT_BATCHES", "2")
 os.environ.setdefault("EMBEDDING_BATCH_DELAY_MS", "1000")
 
 # === 임포트 (server.py가 env 기반으로 provider 자동 선택) ===
@@ -113,21 +113,7 @@ async def reindex(target_path: str, recursive: bool = True, force: bool = False)
         ).load_data()
         processed_files = changed_files
 
-    # 2. Pre-process: strip YAML frontmatter before chunking
-    from chunking import (
-        _normalize_meta,
-        inject_header_prefix,
-        merge_small_chunks,
-        strip_frontmatter,
-    )
-
-    for doc in documents:
-        clean_text, fm = strip_frontmatter(doc.text)
-        doc.text = clean_text
-        doc.metadata["tags"] = _normalize_meta(fm.get("tags"))
-        doc.metadata["aliases"] = _normalize_meta(fm.get("aliases"))
-
-    # 3. 청킹
+    # 2. 청킹
     log(f"✂️  청킹 중... (documents={len(documents)})")
     nodes = MarkdownNodeParser(chunk_size=MARKDOWN_CHUNK_SIZE).get_nodes_from_documents(documents)
     chunk_overlap = min(MARKDOWN_CHUNK_OVERLAP, max(0, MARKDOWN_CHUNK_SIZE - 1))
@@ -136,7 +122,26 @@ async def reindex(target_path: str, recursive: bool = True, force: bool = False)
     ).get_nodes_from_documents(nodes)
     chunked_nodes = [node for node in chunked_nodes if node.text.strip()]
 
-    # Post-process: merge small chunks + inject parent header context.
+    # Post-process: strip frontmatter + merge small chunks + inject parent header context.
+    from chunking import (
+        _normalize_meta,
+        inject_header_prefix,
+        merge_small_chunks,
+        strip_frontmatter,
+    )
+
+    # Strip YAML frontmatter from nodes and collect tags/aliases per file.
+    file_meta: dict[str, dict[str, str]] = {}  # path -> {tags, aliases}
+    for node in chunked_nodes:
+        fp = node.metadata.get("file_path", "")
+        clean_text, fm = strip_frontmatter(node.text)
+        node.text = clean_text
+        if fp not in file_meta and fm:
+            file_meta[fp] = {
+                "tags": _normalize_meta(fm.get("tags")),
+                "aliases": _normalize_meta(fm.get("aliases")),
+            }
+
     if MIN_CHUNK_TOKENS > 0:
         pre_merge = len(chunked_nodes)
         chunked_nodes = merge_small_chunks(
@@ -194,8 +199,8 @@ async def reindex(target_path: str, recursive: bool = True, force: bool = False)
             "text": node.text,
             "filename": node.metadata["file_name"],
             "path": node.metadata["file_path"],
-            "tags": node.metadata.get("tags", ""),
-            "aliases": node.metadata.get("aliases", ""),
+            "tags": file_meta.get(node.metadata["file_path"], {}).get("tags", ""),
+            "aliases": file_meta.get(node.metadata["file_path"], {}).get("aliases", ""),
         }
         for vector, node in zip(vectors, chunked_nodes)
     ]
