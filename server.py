@@ -26,8 +26,7 @@ from utils import (
     INDEX_DATA_PATH,
     SearchResult,
     ensure_collection,
-    get_changed_files,
-    get_deleted_files,
+    get_index_delta,
     list_md_files,
     update_tracking_file,
 )
@@ -275,11 +274,9 @@ async def index_documents(
         processed_files = [doc.metadata["file_path"] for doc in documents]
 
     else:
-        changed_files = get_changed_files(target_path, recursive=recursive)
-
-        # Prune stale vectors for deleted/moved files
+        # Single-pass delta scan (changed + deleted) for faster incremental indexing.
+        changed_files, deleted_files = get_index_delta(target_path, recursive=recursive)
         ensure_collection(milvus_client)
-        deleted_files = get_deleted_files(target_path, recursive=recursive)
         pruned_count = 0
         for file_path in deleted_files:
             try:

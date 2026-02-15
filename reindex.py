@@ -28,7 +28,7 @@ from server import (
     EMBEDDING_BATCH_SIZE, EMBEDDING_CONCURRENT_BATCHES,
     EMBEDDING_BATCH_DELAY_MS, EMBEDDING_PROVIDER,
 )
-from utils import ensure_collection, list_md_files, get_changed_files, get_deleted_files, update_tracking_file
+from utils import ensure_collection, get_index_delta, list_md_files, update_tracking_file
 from llama_index.core import SimpleDirectoryReader
 from llama_index.core.node_parser import MarkdownNodeParser
 from llama_index.core.text_splitter import TokenTextSplitter
@@ -73,8 +73,8 @@ async def reindex(target_path: str, recursive: bool = True, force: bool = False)
     else:
         ensure_collection(milvus_client)
 
-        # Prune stale vectors for deleted/moved files
-        deleted_files = get_deleted_files(target_path, recursive=recursive)
+        # Single-pass delta scan (changed + deleted) for faster incremental indexing.
+        changed_files, deleted_files = get_index_delta(target_path, recursive=recursive)
         pruned_count = 0
         for file_path in deleted_files:
             try:
@@ -87,7 +87,6 @@ async def reindex(target_path: str, recursive: bool = True, force: bool = False)
         if pruned_count > 0:
             log(f"🗑️  Pruned {pruned_count} deleted/moved files from index")
 
-        changed_files = get_changed_files(target_path, recursive=recursive)
         if not changed_files:
             if pruned_count > 0:
                 log(f"✅ Pruned {pruned_count} stale files. No new changes.")

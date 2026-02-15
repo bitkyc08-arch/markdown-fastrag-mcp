@@ -81,6 +81,6 @@ uv run python reindex.py /path/to/vault
 
 ## TODO
 
-- [ ] `server.py` index_documents에도 insert 배치 처리 적용
+- [x] `server.py` index_documents에도 insert 배치 처리 적용 → Phase 2에서 완료
 - [ ] smart-coding-mcp에도 유사한 `reindex.js` CLI 작성
-- [ ] rag skill 문서 업데이트
+- [x] rag skill 문서 업데이트 → `.agents/skills/rag/SKILL.md` 에 shell reindex 섹션 추가 완료
