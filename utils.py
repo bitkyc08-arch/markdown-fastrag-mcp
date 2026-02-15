@@ -11,7 +11,7 @@ from pymilvus import MilvusClient
 
 INDEX_DATA_PATH = os.getenv("MARKDOWN_RAG_CACHE_DIR", "./.db")
 INDEX_TRACKING_FILE = "index_tracking.json"
-COLLECTION_NAME = "markdown_vectors"
+COLLECTION_NAME = os.getenv("MARKDOWN_COLLECTION", "markdown_vectors")
 
 
 class Entity(BaseModel):

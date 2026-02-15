@@ -646,14 +646,21 @@ async def _execute_index_job(
             _active_targets.discard(target_path)
             _cleanup_expired_jobs_locked()
 
-def search(query: str, k: int) -> list[list[SearchResult]]:
+def search(query: str, k: int, scope_path: str = "") -> list[list[SearchResult]]:
     query_vectors = embedding_fn.encode_queries([query])
-    res = milvus_client.search(
+    search_params = dict(
         collection_name=COLLECTION_NAME,
         data=query_vectors,
         limit=k,
         output_fields=list(Entity.model_fields.keys()),
     )
+    if scope_path:
+        scope_prefix = os.path.normpath(scope_path)
+        if not scope_prefix.endswith(os.sep):
+            scope_prefix += os.sep
+        safe_prefix = scope_prefix.replace("'", "\\'")
+        search_params["filter"] = f"path like '{safe_prefix}%'"
+    res = milvus_client.search(**search_params)
     return res
 
 
@@ -682,6 +689,17 @@ async def index_documents(
     else:
         target_path = os.path.join(current_working_directory, directory)
     recursive, recursive_warning = _normalize_recursive(recursive)
+
+    # Block force_reindex via MCP — shell only
+    if force_reindex:
+        return {
+            "accepted": False,
+            "status": "rejected",
+            "message": (
+                "force_reindex=true is not allowed via MCP. "
+                "Use shell: uv run python reindex.py /path --force"
+            ),
+        }
 
     if not os.path.exists(target_path):
         return {
@@ -794,14 +812,40 @@ async def get_index_status(
 
 @mcp.tool(
     name="search_documents",
-    description="Search for semantically relevant documents based on query",
+    description=(
+        "Search for semantically relevant documents based on query. "
+        "Use scope_path to limit results to a specific subdirectory."
+    ),
     tags={"search", "query"},
 )
 async def search_documents(
     query: str = Field(description="Query to search for"),
     k: int = Field(5, description="Number of documents to return"),
+    scope_path: str = Field(
+        "",
+        description=(
+            "Limit search to files under this absolute path prefix. "
+            "Empty string searches all indexed documents."
+        ),
+    ),
 ):
-    results = search(query, k=k)
+    # Validate scope_path against workspace
+    if scope_path and MARKDOWN_WORKSPACE:
+        workspace = os.path.realpath(MARKDOWN_WORKSPACE)
+        scope = os.path.realpath(scope_path)
+        try:
+            if os.path.commonpath([workspace, scope]) != workspace:
+                return (
+                    f"Error: scope_path must be under MARKDOWN_WORKSPACE "
+                    f"({MARKDOWN_WORKSPACE}). Got: {scope_path}"
+                )
+        except ValueError:
+            return (
+                f"Error: scope_path must be under MARKDOWN_WORKSPACE "
+                f"({MARKDOWN_WORKSPACE}). Got: {scope_path}"
+            )
+
+    results = search(query, k=k, scope_path=scope_path)
 
     return "\n---\n".join(
         [

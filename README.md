@@ -58,6 +58,7 @@ Add to your MCP host config:
 - **Smart incremental indexing** — mtime/size fast-path skips unchanged files without reading them; hash only computed when metadata changes
 - **Single-pass delta scan** — detects new, changed, and deleted files in one directory walk
 - **Scoped pruning** — only prunes tracked files under the indexed directory; subdirectory indexing never wipes unrelated tracking data
+- **Scoped search** — `scope_path` parameter filters results to a subdirectory without separate indexing
 - **Workspace lock** — set `MARKDOWN_WORKSPACE` to fix the root directory; agents can't accidentally scope to subdirectories
 - **Stale vector pruning** — automatically removes vectors for deleted or moved files from Milvus
 - **Batch embedding** — concurrent batches with rate-limit retry (429 exponential backoff)
@@ -607,7 +608,7 @@ index_documents(cwd, recursive=true) → get_index_status(job_id) → search_doc
 - Document RAG → User's language (e.g. Korean)
 
 **Destructive Operations (caution)**:
-- `index_documents(force_reindex=true)` — drops and recreates collection
+- `index_documents(force_reindex=true)` — **blocked via MCP** (returns error). Use shell `reindex.py --force` instead
 - `clear_index` — deletes all vectors + tracking data
 - Only execute when explicitly requested by user
 
@@ -617,14 +618,15 @@ index_documents(cwd, recursive=true) → get_index_status(job_id) → search_doc
 
 ### Core
 
-| Variable             | Default                  | Description                                                                                           |
-| -------------------- | ------------------------ | ----------------------------------------------------------------------------------------------------- |
-| `EMBEDDING_PROVIDER` | `local`                  | `gemini`, `openai`, `openai-compatible`, `vertex`, `voyage`, `local`                                  |
-| `EMBEDDING_MODEL`    | (provider default)       | Model name override                                                                                   |
-| `EMBEDDING_DIM`      | `768`                    | Vector dimension                                                                                      |
-| `MILVUS_ADDRESS`     | `.db/milvus_markdown.db` | Milvus address (`http://host:port`), Zilliz URI, or local file path                                   |
-| `MILVUS_TOKEN`       | —                        | Auth token (required for Zilliz Cloud)                                                                |
-| `MARKDOWN_WORKSPACE` | —                        | Lock workspace root. When set, `index_documents` always uses this path, ignoring agent-supplied paths |
+| Variable              | Default                  | Description                                                                                           |
+| --------------------- | ------------------------ | ----------------------------------------------------------------------------------------------------- |
+| `EMBEDDING_PROVIDER`  | `local`                  | `gemini`, `openai`, `openai-compatible`, `vertex`, `voyage`, `local`                                  |
+| `EMBEDDING_MODEL`     | (provider default)       | Model name override                                                                                   |
+| `EMBEDDING_DIM`       | `768`                    | Vector dimension                                                                                      |
+| `MILVUS_ADDRESS`      | `.db/milvus_markdown.db` | Milvus address (`http://host:port`), Zilliz URI, or local file path                                   |
+| `MILVUS_TOKEN`        | —                        | Auth token (required for Zilliz Cloud)                                                                |
+| `MARKDOWN_WORKSPACE`  | —                        | Lock workspace root. When set, `index_documents` always uses this path, ignoring agent-supplied paths |
+| `MARKDOWN_COLLECTION` | `markdown_vectors`       | Milvus collection name. Override to use a separate collection for different projects                  |
 
 ### Indexing Tuning
 
