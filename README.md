@@ -647,7 +647,7 @@ index_documents(cwd, recursive=true) → get_index_status(job_id) → search_doc
 | `DEDUP_MAX_PER_FILE`           | `1`     | Max results per file in search. Ensures maximum source diversity — each file contributes at most 1 chunk (k×5 oversampling feeds the selection pool). `0` = disabled |
 | `EMBEDDING_BATCH_SIZE`         | `250`   | Texts per embedding API call                                                                                                                                         |
 | `EMBEDDING_BATCH_DELAY_MS`     | `0`     | Delay between embedding batches (ms). Set to `1000` for rate-limited APIs.                                                                                           |
-| `EMBEDDING_CONCURRENT_BATCHES` | `4`     | Parallel embedding batches                                                                                                                                           |
+| `EMBEDDING_CONCURRENT_BATCHES` | `2`     | Parallel embedding batches                                                                                                                                           |
 | `MILVUS_INSERT_BATCH`          | `5000`  | Rows per Milvus insert call (gRPC 64MB limit)                                                                                                                        |
 | `MARKDOWN_BG_MAX_JOBS`         | `1`     | Max concurrent active background index jobs                                                                                                                          |
 | `MARKDOWN_BG_JOB_TTL_SECONDS`  | `1800`  | Keep succeeded/failed job metadata in memory for this many seconds                                                                                                   |
@@ -784,6 +784,7 @@ This project is a fork of [MCP-Markdown-RAG](https://github.com/Zackriya-Solutio
 - Stale vector pruning for deleted/moved files
 - **Workspace lock** (`MARKDOWN_WORKSPACE`) and scoped pruning for safe subdirectory indexing
 - Batch embedding with 429 retry + batch Milvus insert (gRPC 64MB limit)
+- **Frontmatter strip + metadata** — YAML frontmatter stripped before embedding; `tags`/`aliases` stored as Milvus fields
 - Shell reindex CLI (`reindex.py`) with real-time progress
 - Configurable file/directory exclusions
 - Milvus Standalone (Docker) support for multi-agent concurrent access
