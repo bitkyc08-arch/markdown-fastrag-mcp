@@ -4,9 +4,18 @@
 [![MCP Server](https://img.shields.io/badge/MCP-Server-blue)](https://modelcontextprotocol.io)
 [![Python](https://img.shields.io/badge/Python-%3E%3D3.10-blue.svg)](https://python.org/)
 
-A semantic search engine for your markdown documents. An MCP server that indexes notes, docs, and knowledge bases into a Milvus vector database, letting AI assistants find relevant content by **meaning**.
+A semantic search engine for your markdown documents. An MCP server that indexes notes, docs, and knowledge bases into a Milvus vector database, letting AI assistants find relevant content by **meaning**. Supports **multi-agent concurrent access** via Milvus Docker — run Claude, Codex, Copilot, and Antigravity against the same document index simultaneously.
 
 > Ask *"what are the tradeoffs of microservices?"* and find your notes about service boundaries, distributed systems, and API design — even if none of them mention "microservices."
+
+```mermaid
+graph LR
+    A["Claude Code"] --> M["Milvus Standalone\n(Docker)"]
+    B["Codex"] --> M
+    C["Copilot"] --> M
+    D["Antigravity"] --> M
+    M --> V["Shared Document Index"]
+```
 
 ## Features
 
