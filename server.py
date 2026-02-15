@@ -45,6 +45,14 @@ mcp = FastMCP(
 if not os.path.exists(INDEX_DATA_PATH):
     os.makedirs(INDEX_DATA_PATH)
 
+# --- Workspace Lock ---
+# When set, all index_documents calls use this as the root directory,
+# ignoring the current_working_directory/directory params from the agent.
+MARKDOWN_WORKSPACE = os.getenv("MARKDOWN_WORKSPACE", "").strip() or None
+if MARKDOWN_WORKSPACE:
+    print(f"[Workspace] Locked to: {MARKDOWN_WORKSPACE}", file=sys.stderr)
+
+
 # --- Embedding Provider Selection ---
 EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "local").lower()
 EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "768"))
@@ -651,7 +659,15 @@ def search(query: str, k: int) -> list[list[SearchResult]]:
 
 @mcp.tool(
     name="index_documents",
-    description="Index Markdown files. Returns IMMEDIATELY with job_id (non-blocking). Poll get_index_status until status='succeeded' before calling search_documents. Do NOT search while indexing.",
+    description=(
+        "Index Markdown files. Returns IMMEDIATELY with job_id (non-blocking). "
+        "Poll get_index_status until status='succeeded' before calling search_documents. "
+        "Do NOT search while indexing. "
+        "WARNING: If MARKDOWN_WORKSPACE env is set, the workspace root is locked and "
+        "current_working_directory/directory params are ignored. "
+        "If not set, always pass the vault root as current_working_directory to avoid "
+        "partial tracking file corruption."
+    ),
     tags={"index", "background", "async"},
 )
 async def index_documents(
@@ -660,7 +676,11 @@ async def index_documents(
     recursive: bool = Field(True, description="Recursively index subdirectories"),
     force_reindex: bool = Field(False, description="Force reindex"),
 ):
-    target_path = os.path.join(current_working_directory, directory)
+    # If MARKDOWN_WORKSPACE is set, override agent-supplied paths.
+    if MARKDOWN_WORKSPACE:
+        target_path = MARKDOWN_WORKSPACE
+    else:
+        target_path = os.path.join(current_working_directory, directory)
     recursive, recursive_warning = _normalize_recursive(recursive)
 
     if not os.path.exists(target_path):
@@ -795,7 +815,11 @@ async def search_documents(
 
 @mcp.tool(
     name="clear_index",
-    description="Clear the vector database's collection and reset the tracking file",
+    description=(
+        "DESTRUCTIVE: Clear the entire vector database collection and reset the tracking file. "
+        "This deletes ALL indexed documents and cannot be undone. "
+        "A full reindex is required after clearing. Only use when explicitly requested by the user."
+    ),
     tags={"clear", "reset"},
 )
 async def clear_index():

@@ -57,6 +57,8 @@ Add to your MCP host config:
 - **Async background indexing** — non-blocking `index_documents` returns instantly with `job_id`; poll progress with `get_index_status`
 - **Smart incremental indexing** — mtime/size fast-path skips unchanged files without reading them; hash only computed when metadata changes
 - **Single-pass delta scan** — detects new, changed, and deleted files in one directory walk
+- **Scoped pruning** — only prunes tracked files under the indexed directory; subdirectory indexing never wipes unrelated tracking data
+- **Workspace lock** — set `MARKDOWN_WORKSPACE` to fix the root directory; agents can't accidentally scope to subdirectories
 - **Stale vector pruning** — automatically removes vectors for deleted or moved files from Milvus
 - **Batch embedding** — concurrent batches with rate-limit retry (429 exponential backoff)
 - **Batch insert** — chunked Milvus inserts to stay under the gRPC 64MB message limit
@@ -438,9 +440,10 @@ def get_index_delta(directory, recursive=False) -> tuple[list[str], list[str]]:
     md_files = list_md_files(directory, recursive)
     current_files_set = set(md_files)
 
-    # Single pass: detect deletions (tracked but not on disk)
+    # Scoped pruning: only check files under the target directory
+    target_prefix = os.path.normpath(directory) + os.sep
     for tracked_path in list(tracking_data.keys()):
-        if tracked_path not in current_files_set:
+        if tracked_path.startswith(target_prefix) and tracked_path not in current_files_set:
             deleted_files.append(tracked_path)
 
     # Single pass (cont.): detect changes (mtime/size fast-path → hash fallback)
@@ -614,13 +617,14 @@ index_documents(cwd, recursive=true) → get_index_status(job_id) → search_doc
 
 ### Core
 
-| Variable             | Default                  | Description                                                          |
-| -------------------- | ------------------------ | -------------------------------------------------------------------- |
-| `EMBEDDING_PROVIDER` | `local`                  | `gemini`, `openai`, `openai-compatible`, `vertex`, `voyage`, `local` |
-| `EMBEDDING_MODEL`    | (provider default)       | Model name override                                                  |
-| `EMBEDDING_DIM`      | `768`                    | Vector dimension                                                     |
-| `MILVUS_ADDRESS`     | `.db/milvus_markdown.db` | Milvus address (`http://host:port`), Zilliz URI, or local file path  |
-| `MILVUS_TOKEN`       | —                        | Auth token (required for Zilliz Cloud)                               |
+| Variable             | Default                  | Description                                                                                           |
+| -------------------- | ------------------------ | ----------------------------------------------------------------------------------------------------- |
+| `EMBEDDING_PROVIDER` | `local`                  | `gemini`, `openai`, `openai-compatible`, `vertex`, `voyage`, `local`                                  |
+| `EMBEDDING_MODEL`    | (provider default)       | Model name override                                                                                   |
+| `EMBEDDING_DIM`      | `768`                    | Vector dimension                                                                                      |
+| `MILVUS_ADDRESS`     | `.db/milvus_markdown.db` | Milvus address (`http://host:port`), Zilliz URI, or local file path                                   |
+| `MILVUS_TOKEN`       | —                        | Auth token (required for Zilliz Cloud)                                                                |
+| `MARKDOWN_WORKSPACE` | —                        | Lock workspace root. When set, `index_documents` always uses this path, ignoring agent-supplied paths |
 
 ### Indexing Tuning
 
@@ -765,6 +769,7 @@ This project is a fork of [MCP-Markdown-RAG](https://github.com/Zackriya-Solutio
 - **Async background indexing** with job management and progress polling
 - Single-pass incremental indexing with mtime/size fast-path
 - Stale vector pruning for deleted/moved files
+- **Workspace lock** (`MARKDOWN_WORKSPACE`) and scoped pruning for safe subdirectory indexing
 - Batch embedding with 429 retry + batch Milvus insert (gRPC 64MB limit)
 - Shell reindex CLI (`reindex.py`) with real-time progress
 - Configurable file/directory exclusions

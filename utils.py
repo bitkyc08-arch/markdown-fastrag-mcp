@@ -148,8 +148,11 @@ def get_index_delta(
     current_files_set = set(md_files)
 
     # Step 1: prune tracked files missing from current scan.
+    # IMPORTANT: Only prune files that fall UNDER the target directory.
+    # Files outside target_path belong to other index scopes and must not be touched.
+    target_prefix = os.path.normpath(directory) + os.sep
     for tracked_path in list(tracking_data.keys()):
-        if tracked_path not in current_files_set:
+        if tracked_path.startswith(target_prefix) and tracked_path not in current_files_set:
             deleted_files.append(tracked_path)
             tracking_data.pop(tracked_path, None)
             tracking_dirty = True
