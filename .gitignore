@@ -17,3 +17,4 @@ wheels/
 demo/
 # Internal development logs
 devlog/
+dist/
