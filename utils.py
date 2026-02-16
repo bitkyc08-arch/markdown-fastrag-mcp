@@ -208,6 +208,81 @@ def get_index_delta(
     return changed_files, deleted_files
 
 
+def get_index_delta_detailed(
+    directory: str,
+    recursive: bool = False,
+) -> tuple[list[str], list[str], list[str]]:
+    """
+    3-way incremental diff:
+    - new_files: files not in tracking (no Milvus vectors exist, skip delete)
+    - modified_files: tracked files whose content changed (need delete + re-embed)
+    - deleted_files: tracked files no longer present on disk
+    """
+    tracking_data = load_tracking_file()
+    new_files: list[str] = []
+    modified_files: list[str] = []
+    deleted_files: list[str] = []
+    tracking_dirty = False
+
+    md_files = list_md_files(directory, recursive)
+    current_files_set = set(md_files)
+
+    # Step 1: prune tracked files missing from current scan.
+    target_prefix = os.path.normpath(directory) + os.sep
+    for tracked_path in list(tracking_data.keys()):
+        if tracked_path.startswith(target_prefix) and tracked_path not in current_files_set:
+            deleted_files.append(tracked_path)
+            tracking_data.pop(tracked_path, None)
+            tracking_dirty = True
+
+    # Step 2: classify new vs modified with fast metadata check first.
+    for file_path in md_files:
+        if file_path not in tracking_data:
+            new_files.append(file_path)
+            continue
+
+        stored_hash, stored_time, stored_size = _parse_tracking_entry(
+            tracking_data[file_path]
+        )
+        if not stored_hash:
+            new_files.append(file_path)
+            continue
+
+        try:
+            file_stat = os.stat(file_path)
+        except (FileNotFoundError, PermissionError):
+            tracking_data.pop(file_path, None)
+            deleted_files.append(file_path)
+            tracking_dirty = True
+            continue
+
+        current_modified_time = file_stat.st_mtime
+        current_size = file_stat.st_size
+
+        # Fast path: unchanged metadata => unchanged content.
+        if stored_time == current_modified_time and (
+            stored_size is None or stored_size == current_size
+        ):
+            if stored_size is None:
+                tracking_data[file_path] = [stored_hash, stored_time, current_size]
+                tracking_dirty = True
+            continue
+
+        current_hash = _get_file_hash(file_path)
+        if current_hash != stored_hash:
+            modified_files.append(file_path)
+            continue
+
+        # Metadata changed but content same: refresh tracking only.
+        tracking_data[file_path] = [current_hash, current_modified_time, current_size]
+        tracking_dirty = True
+
+    if tracking_dirty:
+        save_tracking_file(tracking_data)
+
+    return new_files, modified_files, deleted_files
+
+
 EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "768"))
 
 

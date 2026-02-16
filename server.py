@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -29,6 +30,7 @@ from utils import (
     SearchResult,
     ensure_collection,
     get_index_delta,
+    get_index_delta_detailed,
     list_md_files,
     update_tracking_file,
 )
@@ -425,28 +427,57 @@ async def _run_index_job(
         processed_files = [doc.metadata["file_path"] for doc in documents]
         pruned_count = 0
     else:
-        # Protect tracking file read/write operations from concurrent jobs.
+        t0 = time.monotonic()
+
+        # Phase 13: offload sync delta scan to thread.
         async with _tracking_lock:
-            changed_files, deleted_files = get_index_delta(target_path, recursive=recursive)
+            new_files, modified_files, deleted_files = await asyncio.to_thread(
+                get_index_delta_detailed, target_path, recursive=recursive
+            )
+        t_scan = time.monotonic() - t0
 
         ensure_collection(milvus_client)
-        pruned_count = 0
-        for file_path in deleted_files:
-            try:
-                milvus_client.delete(
-                    collection_name=COLLECTION_NAME, filter=f"path == '{file_path}'"
-                )
-                pruned_count += 1
-            except Exception:
-                continue
+
+        # Phase 13: Milvus delete — only for deleted + modified (skip new).
+        t1 = time.monotonic()
+
+        async def _prune_milvus(files: list[str]) -> int:
+            """Delete vectors for given file paths in a worker thread."""
+            if not files:
+                return 0
+            def _do() -> int:
+                count = 0
+                for fp in files:
+                    try:
+                        milvus_client.delete(
+                            collection_name=COLLECTION_NAME,
+                            filter=f"path == '{fp}'",
+                        )
+                        count += 1
+                    except Exception:
+                        pass
+                return count
+            return await asyncio.to_thread(_do)
+
+        pruned_count = await _prune_milvus(deleted_files)
         if pruned_count > 0:
             print(
                 f"[Indexer] Pruned {pruned_count} deleted/moved files from index",
                 file=sys.stderr,
                 flush=True,
             )
+        # Only delete old vectors for modified files (new files have none).
+        modified_pruned = await _prune_milvus(modified_files)
+        if modified_pruned > 0:
+            print(
+                f"[Indexer] Cleared {modified_pruned} modified files for re-embedding",
+                file=sys.stderr,
+                flush=True,
+            )
+        t_prune = time.monotonic() - t1
 
-        if not changed_files:
+        all_changed = new_files + modified_files
+        if not all_changed:
             message = (
                 f"Pruned {pruned_count} deleted/moved files. No new files to index."
                 if pruned_count > 0
@@ -463,21 +494,30 @@ async def _run_index_job(
                     processed_chunks=0,
                     total_chunks=0,
                 )
-            return {"message": message, "pruned_files": pruned_count}
+            return {
+                "message": message,
+                "pruned_files": pruned_count,
+                "delta_counts": {
+                    "new": len(new_files),
+                    "modified": len(modified_files),
+                    "deleted": len(deleted_files),
+                },
+                "timings_seconds": {
+                    "delta_scan": round(t_scan, 2),
+                    "prune": round(t_prune, 2),
+                    "total": round(time.monotonic() - t0, 2),
+                },
+            }
 
-        # Remove old chunks for changed files before inserting fresh embeddings.
-        for file_path in changed_files:
-            try:
-                milvus_client.delete(
-                    collection_name=COLLECTION_NAME, filter=f"path == '{file_path}'"
-                )
-            except Exception:
-                continue
-
-        documents = SimpleDirectoryReader(
-            input_files=changed_files, required_exts=[".md"]
-        ).load_data()
-        processed_files = changed_files
+        # Phase 13: offload file loading to thread.
+        t2 = time.monotonic()
+        documents = await asyncio.to_thread(
+            lambda: SimpleDirectoryReader(
+                input_files=all_changed, required_exts=[".md"]
+            ).load_data()
+        )
+        processed_files = all_changed
+        t_load = time.monotonic() - t2
 
     if job is not None:
         _set_job_progress(
@@ -488,15 +528,7 @@ async def _run_index_job(
             total_files=len(processed_files),
         )
 
-    # Convert to nodes based on markdown structure, then split larger nodes into chunks.
-    nodes = MarkdownNodeParser(chunk_size=MARKDOWN_CHUNK_SIZE).get_nodes_from_documents(documents)
-    chunk_overlap = min(MARKDOWN_CHUNK_OVERLAP, max(0, MARKDOWN_CHUNK_SIZE - 1))
-    chunked_nodes = TokenTextSplitter(
-        chunk_size=MARKDOWN_CHUNK_SIZE, chunk_overlap=chunk_overlap
-    ).get_nodes_from_documents(nodes)
-    chunked_nodes = [node for node in chunked_nodes if node.text.strip()]
-
-    # Post-process: strip frontmatter + merge small chunks + inject parent header context.
+    # Phase 13: offload chunking pipeline to thread.
     from chunking import (
         _normalize_meta,
         inject_header_prefix,
@@ -504,23 +536,38 @@ async def _run_index_job(
         strip_frontmatter,
     )
 
-    # Strip YAML frontmatter from nodes and collect tags/aliases per file.
-    file_meta: dict[str, dict[str, str]] = {}  # path -> {tags, aliases}
-    for node in chunked_nodes:
-        fp = node.metadata.get("file_path", "")
-        clean_text, fm = strip_frontmatter(node.text)
-        node.text = clean_text
-        if fp not in file_meta and fm:
-            file_meta[fp] = {
-                "tags": _normalize_meta(fm.get("tags")),
-                "aliases": _normalize_meta(fm.get("aliases")),
-            }
+    t3 = time.monotonic()
 
-    if MIN_CHUNK_TOKENS > 0:
-        chunked_nodes = merge_small_chunks(
-            chunked_nodes, MIN_CHUNK_TOKENS, MARKDOWN_CHUNK_SIZE
-        )
-    chunked_nodes = inject_header_prefix(chunked_nodes)
+    def _do_chunking(docs):
+        """CPU-bound chunking pipeline — runs in worker thread."""
+        nodes = MarkdownNodeParser(chunk_size=MARKDOWN_CHUNK_SIZE).get_nodes_from_documents(docs)
+        chunk_overlap = min(MARKDOWN_CHUNK_OVERLAP, max(0, MARKDOWN_CHUNK_SIZE - 1))
+        chunked = TokenTextSplitter(
+            chunk_size=MARKDOWN_CHUNK_SIZE, chunk_overlap=chunk_overlap
+        ).get_nodes_from_documents(nodes)
+        chunked = [node for node in chunked if node.text.strip()]
+
+        # Strip YAML frontmatter from nodes and collect tags/aliases per file.
+        f_meta: dict[str, dict[str, str]] = {}
+        for node in chunked:
+            fp = node.metadata.get("file_path", "")
+            clean_text, fm = strip_frontmatter(node.text)
+            node.text = clean_text
+            if fp not in f_meta and fm:
+                f_meta[fp] = {
+                    "tags": _normalize_meta(fm.get("tags")),
+                    "aliases": _normalize_meta(fm.get("aliases")),
+                }
+
+        if MIN_CHUNK_TOKENS > 0:
+            chunked = merge_small_chunks(
+                chunked, MIN_CHUNK_TOKENS, MARKDOWN_CHUNK_SIZE
+            )
+        chunked = inject_header_prefix(chunked)
+        return chunked, f_meta
+
+    chunked_nodes, file_meta = await asyncio.to_thread(_do_chunking, documents)
+    t_chunk = time.monotonic() - t3
 
     # Extract text from nodes and embed (parallel batches for speed).
     texts = [node.text for node in chunked_nodes]
@@ -537,6 +584,7 @@ async def _run_index_job(
         job.total_chunks = len(texts)
         job.touch()
 
+    t4 = time.monotonic()
     vectors: list[list[float]] = [None] * len(texts)  # type: ignore[assignment]
     executor = ThreadPoolExecutor(max_workers=EMBEDDING_CONCURRENT_BATCHES)
     loop = asyncio.get_running_loop()
@@ -578,6 +626,8 @@ async def _run_index_job(
             await asyncio.sleep(EMBEDDING_BATCH_DELAY_MS / 1000.0)
 
     executor.shutdown(wait=False)
+    t_embed = time.monotonic() - t4
+
     data = [
         {
             "vector": vector,
@@ -593,9 +643,13 @@ async def _run_index_job(
     total_insert_batches = max(1, (len(data) + milvus_insert_batch - 1) // milvus_insert_batch)
     res: dict[str, Any] = {}
 
+    # Phase 13: offload Milvus insert to thread.
+    t5 = time.monotonic()
     for insert_idx, i in enumerate(range(0, len(data), milvus_insert_batch), start=1):
         batch = data[i: i + milvus_insert_batch]
-        res = milvus_client.insert(collection_name=COLLECTION_NAME, data=batch)
+        res = await asyncio.to_thread(
+            milvus_client.insert, collection_name=COLLECTION_NAME, data=batch
+        )
         if job is not None:
             insert_percent = 80 + int((insert_idx / total_insert_batches) * 15)
             _set_job_progress(
@@ -606,10 +660,33 @@ async def _run_index_job(
                 processed_chunks=len(data),
                 total_chunks=len(texts),
             )
+    t_insert = time.monotonic() - t5
 
-    # Protect tracking file write from concurrent jobs.
+    # Phase 13: offload tracking update to thread.
     async with _tracking_lock:
-        update_tracking_file(processed_files)
+        await asyncio.to_thread(update_tracking_file, processed_files)
+
+    t_total = time.monotonic() - t0 if not force_reindex else 0.0
+
+    # Build delta_counts depending on path taken.
+    if force_reindex:
+        delta_counts = None
+        timings = None
+    else:
+        delta_counts = {
+            "new": len(new_files),
+            "modified": len(modified_files),
+            "deleted": len(deleted_files),
+        }
+        timings = {
+            "delta_scan": round(t_scan, 2),
+            "prune": round(t_prune, 2),
+            "load_docs": round(t_load, 2),
+            "chunk": round(t_chunk, 2),
+            "embed": round(t_embed, 2),
+            "insert": round(t_insert, 2),
+            "total": round(t_total, 2),
+        }
 
     result = {
         **res,
@@ -619,6 +696,10 @@ async def _run_index_job(
         "files": [os.path.basename(f) for f in processed_files],
         "pruned_files": pruned_count,
     }
+    if delta_counts is not None:
+        result["delta_counts"] = delta_counts
+    if timings is not None:
+        result["timings_seconds"] = timings
 
     if job is not None:
         _set_job_progress(
@@ -641,6 +722,10 @@ async def _execute_index_job(
     recursive: bool,
     force_reindex: bool,
 ) -> None:
+    # Phase 13: yield to event loop so MCP framework can flush the
+    # index_documents response before we start heavy work.
+    await asyncio.sleep(0)
+
     async with _jobs_lock:
         job = _jobs.get(job_id)
         if job is None:

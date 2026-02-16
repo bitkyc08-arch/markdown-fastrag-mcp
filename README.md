@@ -58,8 +58,10 @@ Add to your MCP host config:
 - **Frontmatter strip + metadata** — YAML frontmatter is stripped before embedding to reduce noise; `tags` and `aliases` are parsed and stored as Milvus metadata fields for future filtering
 - **Search dedup** — per-file result limiting prevents a single document from dominating search results; k×5 oversampling ensures diversity
 - **Async background indexing** — non-blocking `index_documents` returns instantly with `job_id`; poll progress with `get_index_status`
+- **Event-loop-safe threading** — all sync I/O (file walk, Milvus ops, chunking) runs in worker threads via `asyncio.to_thread`; event loop stays responsive during indexing
 - **Smart incremental indexing** — mtime/size fast-path skips unchanged files without reading them; hash only computed when metadata changes
-- **Single-pass delta scan** — detects new, changed, and deleted files in one directory walk
+- **3-way delta scan** — classifies files as new/modified/deleted in one walk; new files skip Milvus delete (zero wasted ops)
+- **Completion metrics** — `delta_counts` (new/modified/deleted) and `timings_seconds` per phase in the final result (~40 extra tokens)
 - **Scoped pruning** — only prunes tracked files under the indexed directory; subdirectory indexing never wipes unrelated tracking data
 - **Scoped search** — `scope_path` parameter filters results to a subdirectory without separate indexing
 - **Workspace lock** — set `MARKDOWN_WORKSPACE` to fix the root directory; agents can't accidentally scope to subdirectories
@@ -90,7 +92,7 @@ graph TB
     end
 
     subgraph Indexing["Indexing Engine (utils.py)"]
-        DELTA["get_index_delta<br/>Single-pass Delta Scan"]
+        DELTA["get_index_delta_detailed<br/>3-way Delta Scan"]
         TRACK["index_tracking.json<br/>mtime / size / hash"]
         CHUNK["llama-index<br/>SentenceSplitter"]
     end
@@ -359,6 +361,8 @@ No additional env vars needed. Omitting `EMBEDDING_PROVIDER` defaults to `local`
 `index_documents` starts indexing in the background without blocking the MCP call.  
 Use `get_index_status` to poll progress and final result.
 
+All sync I/O operations (file walk, Milvus deletes, chunking, inserts, tracking writes) are offloaded to worker threads via `asyncio.to_thread`, keeping the event loop responsive. An initial `await asyncio.sleep(0)` ensures the MCP response is flushed before heavy work begins.
+
 ```mermaid
 sequenceDiagram
     participant Agent
@@ -369,19 +373,31 @@ sequenceDiagram
     Agent->>MCP: index_documents(dir)
     MCP-->>Agent: { accepted: true, job_id: "a1b2c3d4" }
     Note over Agent: Agent is free immediately
+    Note over MCP: sleep(0) → response flush
 
     MCP->>BG: asyncio.create_task()
-    BG->>BG: scan → chunk → embed
+    BG->>BG: scan → chunk → embed (all via to_thread)
     
     Agent->>MCP: get_index_status(job_id)
     MCP-->>Agent: { status: "running", progress: 46%, phase: "embed" }
     
-    BG->>Milvus: batch insert
+    BG->>Milvus: batch insert (to_thread)
     BG->>MCP: job.status = succeeded
     
     Agent->>MCP: get_index_status(job_id)
-    MCP-->>Agent: { status: "succeeded", progress: 100% }
+    MCP-->>Agent: { status: "succeeded", delta_counts, timings_seconds }
 ```
+
+### Completion Metrics
+
+When an incremental index job succeeds, the result includes two optional fields (~40 extra tokens):
+
+| Field             | Content                    | Example                                                   |
+| ----------------- | -------------------------- | --------------------------------------------------------- |
+| `delta_counts`    | `{new, modified, deleted}` | `{"new": 5, "modified": 2, "deleted": 1}`                 |
+| `timings_seconds` | Per-phase durations        | `{"delta_scan": 0.38, "prune": 0.01, ..., "total": 12.5}` |
+
+These fields are omitted for `force_reindex=true` (full rebuild).
 
 ### Concurrency Guards
 
@@ -395,19 +411,19 @@ Concurrency is intentionally conservative by default:
 
 ## Incremental Indexing & Pruning
 
-The indexing engine uses a **single-pass delta scan** (`get_index_delta()`) to efficiently detect new, changed, and deleted files in one directory walk — no separate passes needed.
+The indexing engine uses a **3-way delta scan** (`get_index_delta_detailed()`) to classify files as **new**, **modified**, or **deleted** in a single directory walk. New files skip the Milvus delete step entirely (no vectors exist yet), eliminating wasted ops.
 
 ```mermaid
 flowchart TD
     START["Directory Walk<br/>(single pass)"] --> NEW{"New file?<br/>(not in tracking)"}
-    NEW -->|yes| INDEX["✅ Index<br/>chunk → embed → insert"]
+    NEW -->|yes| INDEX["✅ Index (NEW)<br/>chunk → embed → insert<br/>⚡ skip Milvus delete"]
     NEW -->|no| META{"mtime + size<br/>same as tracked?"}
     META -->|"yes (fast-path)"| SKIP["⏭️ Skip<br/>no file read, no hash<br/>zero I/O cost"]
     META -->|no| HASH{"Read file → MD5<br/>hash changed?"}
-    HASH -->|yes| REINDEX["🔄 Re-index<br/>delete old vectors → re-embed"]
+    HASH -->|yes| REINDEX["🔄 Re-index (MODIFIED)<br/>delete old vectors → re-embed"]
     HASH -->|"no (e.g. touch)"| UPDATE["📝 Update tracking<br/>refresh mtime/size only"]
     START --> MISSING{"Tracked file<br/>missing from disk?"}
-    MISSING -->|yes| PRUNE["🗑️ Prune<br/>delete vectors from Milvus<br/>+ remove from tracking"]
+    MISSING -->|yes| PRUNE["🗑️ Prune (DELETED)<br/>delete vectors from Milvus<br/>+ remove from tracking"]
 
     style INDEX fill:#22543d,color:#c6f6d5
     style SKIP fill:#2d3748,color:#e2e8f0
@@ -492,6 +508,45 @@ Handles common issues when sending thousands of texts to embedding APIs:
 | gRPC 64MB message limit     | Split inserts via `MILVUS_INSERT_BATCH=5000`                     |
 | Memory pressure             | Micro-batching via `EMBEDDING_BATCH_SIZE=100`                    |
 | Inter-batch delay           | Configurable via `EMBEDDING_BATCH_DELAY_MS=1000`                 |
+
+</details>
+
+<details>
+<summary><strong>5. Non-blocking Thread Offloading</strong> — Event loop stays responsive during indexing</summary>
+
+All sync I/O in `_run_index_job` is wrapped with `asyncio.to_thread()`, so the event loop is never blocked:
+
+| Operation                  | Before (Phase 5)   | After (Phase 13)      |
+| -------------------------- | ------------------ | --------------------- |
+| `get_index_delta_detailed` | sync (blocks loop) | `to_thread`           |
+| Milvus delete (per file)   | sync loop          | `to_thread` (batched) |
+| `SimpleDirectoryReader`    | sync               | `to_thread`           |
+| Chunking pipeline          | sync               | `to_thread`           |
+| Milvus insert (per batch)  | sync               | `to_thread`           |
+| Tracking file write        | sync               | `to_thread`           |
+
+An `await asyncio.sleep(0)` at the start of `_execute_index_job` ensures the MCP framework flushes the response before heavy work begins.
+
+**Result**: `get_index_status` and `search_documents` respond instantly even during large index jobs.
+
+</details>
+
+<details>
+<summary><strong>6. 3-Way Delta Classification</strong> — Skip unnecessary Milvus deletes for new files</summary>
+
+`get_index_delta_detailed()` returns three lists instead of two:
+
+```python
+new_files, modified_files, deleted_files = get_index_delta_detailed(dir, recursive=True)
+```
+
+| Category     | Milvus Action     | Reason                       |
+| ------------ | ----------------- | ---------------------------- |
+| **new**      | skip delete       | No vectors exist yet         |
+| **modified** | delete → re-embed | Old vectors must be replaced |
+| **deleted**  | delete only       | Vectors are stale            |
+
+**Result**: On a workspace with 1289 new files, this eliminates 1289 unnecessary Milvus delete calls (each a gRPC round-trip).
 
 </details>
 
