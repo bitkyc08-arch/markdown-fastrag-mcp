@@ -2,6 +2,24 @@
 
 markdown-fastrag-mcp supports multiple embedding providers. Set via `EMBEDDING_PROVIDER` environment variable.
 
+```mermaid
+flowchart TD
+    A{"Need privacy?"} -->|Yes| B["local — 100% offline"]
+    A -->|No| C{"Already on GCP?"}
+    C -->|Yes| D["vertex — service account auth"]
+    C -->|No| E{"Want simplest setup?"}
+    E -->|Yes| F["gemini — API key only"]
+    E -->|No| G{"OpenAI ecosystem?"}
+    G -->|Yes| H["openai / openai-compatible"]
+    G -->|No| I["voyage — high quality"]
+
+    style B fill:#22543d,color:#c6f6d5
+    style D fill:#2a4365,color:#bee3f8
+    style F fill:#553c9a,color:#e9d8fd
+    style H fill:#744210,color:#fefcbf
+    style I fill:#744210,color:#fefcbf
+```
+
 ## Provider Comparison
 
 | Provider              | `EMBEDDING_PROVIDER` | Default Model            | Dimensions | Auth            | Batch Size |

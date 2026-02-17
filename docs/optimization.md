@@ -2,6 +2,20 @@
 
 Performance optimizations implemented in markdown-fastrag-mcp.
 
+```mermaid
+flowchart LR
+    A["Raw Chunks"] --> B{"< MIN_CHUNK_TOKENS?"}
+    B -->|Yes| C["Merge with sibling"]
+    B -->|No| D["Keep as-is"]
+    C --> E["Inject parent headers"]
+    D --> E
+    E --> F["Embed + Insert"]
+
+    style C fill:#744210,color:#fefcbf
+    style E fill:#553c9a,color:#e9d8fd
+    style F fill:#22543d,color:#c6f6d5
+```
+
 ## Smart Chunk Merging
 
 MarkdownNodeParser often produces very small chunks (single-line headers, short paragraphs). These generate low-quality embeddings because there isn't enough semantic content.
