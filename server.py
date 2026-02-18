@@ -1066,6 +1066,7 @@ async def index_documents(
 )
 async def get_index_status(
     job_id: str = Field("", description="Background job ID; empty returns latest job."),
+    _: bool = Field(False, description="Ignored (VS Code Copilot MCP compat)"),
 ):
     lookup_id = job_id.strip()
 
@@ -1152,7 +1153,9 @@ async def search_documents(
     ),
     tags={"clear", "reset"},
 )
-async def clear_index():
+async def clear_index(
+    _: bool = Field(False, description="Ignored (VS Code Copilot MCP compat)"),
+):
     async with _jobs_lock:
         _cleanup_expired_jobs_locked()
         active_jobs = _active_jobs_locked()
