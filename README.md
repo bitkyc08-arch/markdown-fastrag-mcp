@@ -57,6 +57,7 @@ Add to your MCP host config:
 - **3-way delta scan** — classifies files as new/modified/deleted in one walk; new files skip Milvus delete
 - **Smart chunk merging** — small chunks below `MIN_CHUNK_TOKENS` are merged with siblings; parent header context injected
 - **Empty chunk filtering** — frontmatter-only and structural-only chunks (headers/separators with no prose) are dropped at indexing and filtered at search time
+- **Short chunk drop** — final chunks below `MIN_FINAL_TOKENS` (default 150) are dropped with per-chunk stderr logging
 - **Reconciliation sweep** — after each index run, queries all Milvus paths and deletes orphan vectors whose source files no longer exist on disk
 - **Search dedup** — per-file result limiting prevents a single document from dominating results
 - **Scoped search & pruning** — `scope_path` filters results to subdirectories; pruning never wipes unrelated data
@@ -115,14 +116,20 @@ flowchart LR
 
 ### Indexing
 
-| Variable                       | Default | Description                      |
-| ------------------------------ | ------- | -------------------------------- |
-| `MARKDOWN_CHUNK_SIZE`          | `2048`  | Token chunk size                 |
-| `MIN_CHUNK_TOKENS`             | `300`   | Small-chunk merge threshold      |
-| `DEDUP_MAX_PER_FILE`           | `1`     | Max results per file (`0` = off) |
-| `EMBEDDING_BATCH_SIZE`         | `250`   | Texts per API call               |
-| `EMBEDDING_CONCURRENT_BATCHES` | `2`     | Parallel batches                 |
+| Variable                       | Default | Description                              |
+| ------------------------------ | ------- | ---------------------------------------- |
+| `MARKDOWN_CHUNK_SIZE`          | `2048`  | Token chunk size                         |
+| `MARKDOWN_CHUNK_OVERLAP`       | `100`   | Token overlap between chunks             |
+| `MIN_CHUNK_TOKENS`             | `300`   | Small-chunk merge threshold              |
+| `MIN_FINAL_TOKENS`             | `150`   | Drop final chunks below this token count |
+| `DEDUP_MAX_PER_FILE`           | `1`     | Max results per file (`0` = off)         |
+| `EMBEDDING_BATCH_SIZE`         | `250`   | Texts per API call                       |
+| `EMBEDDING_CONCURRENT_BATCHES` | `4`     | Parallel batches                         |
+| `EMBEDDING_BATCH_DELAY_MS`     | `0`     | Delay (ms) between batch waves           |
+| `MILVUS_INSERT_BATCH`          | `5000`  | Rows per Milvus insert (gRPC 64MB limit) |
 
+> **Tip**: Defaults work well for most vaults. Adjust `MIN_CHUNK_TOKENS` / `MIN_FINAL_TOKENS` if short notes are being dropped unexpectedly. Changes require a force reindex (`reindex.py --force`).
+>
 > See [Embedding Providers](docs/embedding-providers.md) for full auth and tuning options.
 
 ## Performance
@@ -147,5 +154,6 @@ This project is a fork of [MCP-Markdown-RAG](https://github.com/Zackriya-Solutio
 - 3-way delta scan (new/modified/deleted)
 - Smart chunk merging with parent header injection
 - Empty chunk filtering (frontmatter-only / structural-only drop)
+- Short chunk drop (final chunks below 150 tokens with per-chunk logging)
 - Reconciliation sweep (Milvus↔disk ghost vector cleanup)
 - Scoped search & pruning, batch embedding, shell CLI

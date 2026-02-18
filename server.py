@@ -530,7 +530,9 @@ async def _run_index_job(
 
     # Phase 13: offload chunking pipeline to thread.
     from chunking import (
+        MIN_FINAL_TOKENS,
         _normalize_meta,
+        count_tokens,
         inject_header_prefix,
         is_structural_only,
         merge_small_chunks,
@@ -575,10 +577,31 @@ async def _run_index_job(
         before_post_prefix_filter = len(chunked)
         chunked = [node for node in chunked if not is_structural_only(node.text)]
         dropped_after_prefix = before_post_prefix_filter - len(chunked)
-        if dropped_after_strip or dropped_after_prefix:
+
+        # Phase 16: drop chunks below MIN_FINAL_TOKENS with per-chunk logging.
+        dropped_short = 0
+        if MIN_FINAL_TOKENS > 0:
+            kept = []
+            for node in chunked:
+                tok = count_tokens(node.text)
+                if tok < MIN_FINAL_TOKENS:
+                    dropped_short += 1
+                    print(
+                        f"[Chunking] DROP short chunk: {tok} tokens, "
+                        f"file={node.metadata.get('file_name', '?')}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                else:
+                    kept.append(node)
+            chunked = kept
+
+        if dropped_after_strip or dropped_after_prefix or dropped_short:
             print(
-                "[Chunking] Dropped structural/empty chunks: "
-                f"after_strip={dropped_after_strip}, after_prefix={dropped_after_prefix}",
+                "[Chunking] Dropped chunks: "
+                f"structural_strip={dropped_after_strip}, "
+                f"structural_prefix={dropped_after_prefix}, "
+                f"short_token={dropped_short}",
                 file=sys.stderr,
                 flush=True,
             )

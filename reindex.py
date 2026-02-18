@@ -124,7 +124,9 @@ async def reindex(target_path: str, recursive: bool = True, force: bool = False)
 
     # Post-process: strip frontmatter + merge small chunks + inject parent header context.
     from chunking import (
+        MIN_FINAL_TOKENS,
         _normalize_meta,
+        count_tokens,
         inject_header_prefix,
         is_structural_only,
         merge_small_chunks,
@@ -161,10 +163,29 @@ async def reindex(target_path: str, recursive: bool = True, force: bool = False)
     before_post_prefix_filter = len(chunked_nodes)
     chunked_nodes = [node for node in chunked_nodes if not is_structural_only(node.text)]
     dropped_after_prefix = before_post_prefix_filter - len(chunked_nodes)
-    if dropped_after_strip or dropped_after_prefix:
+
+    # Phase 16: drop chunks below MIN_FINAL_TOKENS with per-chunk logging.
+    dropped_short = 0
+    if MIN_FINAL_TOKENS > 0:
+        kept = []
+        for node in chunked_nodes:
+            tok = count_tokens(node.text)
+            if tok < MIN_FINAL_TOKENS:
+                dropped_short += 1
+                log(
+                    f"   DROP short chunk: {tok} tokens, "
+                    f"file={node.metadata.get('file_name', '?')}"
+                )
+            else:
+                kept.append(node)
+        chunked_nodes = kept
+
+    if dropped_after_strip or dropped_after_prefix or dropped_short:
         log(
-            "   → 구조/빈 청크 제거: "
-            f"strip={dropped_after_strip}, prefix={dropped_after_prefix}"
+            "   → 청크 제거: "
+            f"structural_strip={dropped_after_strip}, "
+            f"structural_prefix={dropped_after_prefix}, "
+            f"short_token={dropped_short}"
         )
     log(f"   → {len(chunked_nodes)} 청크 생성 (min_tokens={MIN_CHUNK_TOKENS})")
 

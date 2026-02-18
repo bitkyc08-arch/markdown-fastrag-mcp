@@ -14,10 +14,13 @@ flowchart LR
     D --> E
     E --> FI2{"Structural\nonly?"}
     FI2 -->|Yes| DROP2["Drop"]
-    FI2 -->|No| F["Embed + Insert"]
+    FI2 -->|No| TF{"< MIN_FINAL_TOKENS?"}
+    TF -->|Yes| DROP3["Drop + log"]
+    TF -->|No| F["Embed + Insert"]
 
     style DROP1 fill:#742a2a,color:#fed7d7
     style DROP2 fill:#742a2a,color:#fed7d7
+    style DROP3 fill:#742a2a,color:#fed7d7
     style C fill:#744210,color:#fefcbf
     style E fill:#553c9a,color:#e9d8fd
     style F fill:#22543d,color:#c6f6d5
@@ -81,6 +84,21 @@ The runtime filter also re-applies `strip_frontmatter()` to Milvus results, hand
 ### Regex fix: trailing newline
 
 The original `_FM_RE` regex required a trailing newline after the closing `---`. Chunks stored in Milvus without a trailing newline bypassed the runtime filter entirely. Fixed by making the trailing newline optional: `(?:\r?\n|$)`.
+
+## Short Chunk Drop (Phase 16)
+
+After all pipeline stages (strip → merge → inject → structural filter), some chunks are still too short to produce meaningful embeddings — typically file-末尾 remnants with only a title and a changelog line.
+
+**Solution:** `count_tokens()` checks each final chunk against `MIN_FINAL_TOKENS` (default 150, configurable via env). Chunks below the threshold are dropped with per-chunk stderr logging:
+
+```
+[Chunking] DROP short chunk: 65 tokens, file=sujong1-프로젝트-개요.md
+[Chunking] DROP short chunk: 26 tokens, file=default.md
+```
+
+| Env var            | Default | Effect                                    |
+| ------------------ | ------- | ----------------------------------------- |
+| `MIN_FINAL_TOKENS` | `150`   | Chunks below this token count are dropped |
 
 ## Batch Insert with gRPC Size Limit
 

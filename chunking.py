@@ -12,6 +12,7 @@ Used by both server.py and reindex.py to prevent pipeline drift.
 
 from __future__ import annotations
 
+import os
 import re
 from typing import TYPE_CHECKING
 
@@ -83,6 +84,8 @@ except Exception:
     def count_tokens(text: str) -> int:  # type: ignore[misc]
         """Fallback: rough estimate ~4 chars per token."""
         return len(text) // 4
+
+MIN_FINAL_TOKENS = int(os.getenv("MIN_FINAL_TOKENS", "150"))
 
 
 # ---------------------------------------------------------------------------
